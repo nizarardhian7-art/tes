@@ -175,6 +175,7 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
         setSettingsButtonView();
         setFilesButtonView();
         setWorkspaceButtonView();
+        setBuilderButtonView();
         setNewSessionButtonView();
         setToggleKeyboardView();
 
@@ -579,6 +580,18 @@ public final class TermuxActivity extends AppCompatActivity implements ServiceCo
                 DrawerLayout drawer = getDrawer();
                 if (drawer != null) drawer.closeDrawers();
                 new WorkspacesBottomSheet().show(getSupportFragmentManager(), "workspaces");
+            });
+        }
+    }
+
+    private void setBuilderButtonView() {
+        ImageButton builderButton = findViewById(R.id.builder_button);
+        if (builderButton != null) {
+            builderButton.setOnClickListener(v -> {
+                DrawerLayout drawer = getDrawer();
+                if (drawer != null) drawer.closeDrawers();
+                ActivityUtils.startActivity(this,
+                    new Intent(this, com.termux.app.builder.BuilderMainActivity.class));
             });
         }
     }

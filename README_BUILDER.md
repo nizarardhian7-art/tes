@@ -142,7 +142,40 @@ ter-compile otomatis karena `:app` bergantung padanya.
 
 ---
 
-## 5. Catatan Arsitektur & Batasan
+## 5. Membuka APK Builder dari UI
+
+BuilderMainActivity (dashboard APK Builder) dapat dibuka dengan **3 cara**:
+
+### A. Tombol di Drawer Termux (utama) — *baru di v3*
+1. Buka aplikasi Termux → geser dari tepi kiri layar (atau ketuk ikon drawer) untuk
+   membuka **drawer navigasi**.
+2. Di baris ikon bagian atas drawer (Settings · Files · Workspaces), sekarang ada
+   ikon **kunci inggris 🔧 (`ic_build`)**: contentDescription **"APK Builder"**.
+3. Ketuk ikon tersebut → drawer menutup → `BuilderMainActivity` terbuka.
+
+Implementasi:
+- `res/layout/activity_termux.xml` — tombol `@+id/builder_button` (ImageButton,
+  `@drawable/ic_build`, `@string/action_open_apk_builder`).
+- `TermuxActivity.java` — `setBuilderButtonView()`: tutup drawer lalu
+  `ActivityUtils.startActivity(this, new Intent(this, BuilderMainActivity.class))`.
+- `AndroidManifest.xml` — `BuilderMainActivity` kini `exported="false"` (hanya
+  dibuka dari dalam aplikasi) + `parentActivityName=".app.TermuxActivity"` agar
+  back button kembali ke terminal. Intent-filter `LAUNCHER` **dihapus** agar tidak
+  bentrok dengan `TermuxActivity` sebagai launcher utama.
+
+### B. Shortcut Launcher (long-press ikon Termux)
+- Long-press ikon aplikasi Termux di launcher → pilih **"APK Builder"**
+  (shortcut `apk_builder` ditambahkan di `res/xml/shortcuts.xml`, ikon `ic_build`).
+
+### C. (Opsional) Command line / Tasker
+```bash
+am start -n com.termux/com.termux.app.builder.BuilderMainActivity
+```
+> Berlaku untuk build `debug` yang memakai `applicationId=com.termux`.
+
+---
+
+## 6. Catatan Arsitektur & Batasan
 
 - **`:builder-core` adalah library Android** (bukan aplikasi) agar bisa memakai
   `Context` untuk AppShell & resources; tidak ada UI di dalamnya (murni engine).
@@ -156,7 +189,7 @@ ter-compile otomatis karena `:app` bergantung padanya.
 
 ---
 
-## 6. Verifikasi Lokal (Opsional)
+## 7. Verifikasi Lokal (Opsional)
 
 Tanpa menjalankan `gradlew build` (lama), Anda bisa memeriksa konsistensi:
 
@@ -195,3 +228,28 @@ grep kotlin-gradle-plugin build.gradle
 - **Semua 13 file `builder-core`** di-compile dengan `kotlinc 2.2.20` terhadap stub Android + stub termux-shared → **exit 0, 0 error**.
 - **Semua 4 file `app/builder`** di-compile dengan `kotlinc 2.2.20` terhadap stub AndroidX + engine → **exit 0, 0 error**.
 - API yang dipakai (AppShell.execute, ExecutionCommand, ResultData, TermuxShellEnvironment, Logger) diverifikasi satu-per-satu terhadap **source termux-shared asli** di repo ini — semuanya cocok.
+
+---
+
+## Changelog — Entry Point UI APK Builder (v3)
+
+### Perubahan
+
+| File | Perubahan |
+|------|-----------|
+| `app/src/main/res/layout/activity_termux.xml` | Tambah `ImageButton` `@+id/builder_button` di header drawer (setelah tombol Workspaces), ikon `@drawable/ic_build`, `contentDescription` `@string/action_open_apk_builder` |
+| `app/src/main/java/com/termux/app/TermuxActivity.java` | Tambah `setBuilderButtonView()` (tutup drawer → `ActivityUtils.startActivity` ke `BuilderMainActivity`); dipanggil di `onCreate` |
+| `app/src/main/res/drawable/ic_build.xml` | Ikon vector baru (Material "build" / kunci inggris) |
+| `app/src/main/res/values/strings.xml` | String baru `action_open_apk_builder` = "APK Builder" |
+| `app/src/main/AndroidManifest.xml` | `BuilderMainActivity`: **hapus intent-filter `LAUNCHER`** (sebelumnya bentrok sebagai launcher kedua), `exported="false"`, `parentActivityName=".app.TermuxActivity"`, label `@string/action_open_apk_builder` |
+| `app/src/main/res/xml/shortcuts.xml` | Shortcut baru `apk_builder` → `BuilderMainActivity` (muncul saat long-press ikon Termux) |
+| `README_BUILDER.md` | Bagian baru "5. Membuka APK Builder dari UI" (3 cara: drawer, shortcut launcher, `am start`) |
+
+### Catatan
+
+- `BuilderMainActivity` **tidak lagi menjadi launcher** — `TermuxActivity` tetap
+  satu-satunya activity dengan `MAIN`+`LAUNCHER`. Ini menghilangkan ikon ganda
+  (Termux + APK Builder) di launcher.
+- Dengan `exported="false"`, activity hanya bisa dibuka dari dalam aplikasi
+  (drawer, shortcut, atau `am start` dengan UID yang sama) — aman secara security.
+- `parentActivityName` membuat tombol back dari dashboard kembali ke terminal.

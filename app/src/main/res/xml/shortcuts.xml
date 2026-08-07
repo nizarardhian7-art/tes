@@ -51,4 +51,17 @@
             android:name="android.shortcut.conversation"/>
     </shortcut>
 
+    <shortcut
+        android:shortcutId="apk_builder"
+        android:enabled="true"
+        android:icon="@drawable/ic_build"
+        android:shortcutShortLabel="@string/action_open_apk_builder"
+        tools:targetApi="n_mr1">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetPackage="com.termux"
+            android:targetClass="com.termux.app.builder.BuilderMainActivity"
+            android:name="android.shortcut.conversation"/>
+    </shortcut>
+
 </shortcuts>

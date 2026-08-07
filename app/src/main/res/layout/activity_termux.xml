@@ -95,6 +95,15 @@
                         android:background="@null"
                         android:contentDescription="@string/workspace_title"
                         app:tint="?attr/termuxActivityDrawerImageTint" />
+
+                    <ImageButton
+                        android:id="@+id/builder_button"
+                        android:layout_width="40dp"
+                        android:layout_height="40dp"
+                        android:src="@drawable/ic_build"
+                        android:background="@null"
+                        android:contentDescription="@string/action_open_apk_builder"
+                        app:tint="?attr/termuxActivityDrawerImageTint" />
                 </LinearLayout>
 
                 <LinearLayout

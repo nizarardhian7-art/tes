@@ -106,14 +106,10 @@
 
         <activity
             android:name=".app.builder.BuilderMainActivity"
-            android:exported="true"
-            android:label="APK Builder"
-            android:theme="@style/Theme.TermuxApp.DayNight.DarkActionBar">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
-        </activity>
+            android:exported="false"
+            android:label="@string/action_open_apk_builder"
+            android:parentActivityName=".app.TermuxActivity"
+            android:theme="@style/Theme.TermuxApp.DayNight.DarkActionBar" />
 
         <activity
             android:name=".app.filebrowser.FileBrowserActivity"
