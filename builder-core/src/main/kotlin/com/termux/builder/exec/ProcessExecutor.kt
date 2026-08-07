@@ -5,7 +5,9 @@ import com.termux.builder.model.CommandResult
 import com.termux.shared.logger.Logger
 import com.termux.shared.shell.command.ExecutionCommand
 import com.termux.shared.shell.command.runner.app.AppShell
+import com.termux.shared.shell.command.runner.app.AppShell.AppShellClient
 import com.termux.shared.termux.shell.command.environment.TermuxShellEnvironment
+import java.util.Collections
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -36,6 +38,9 @@ class ProcessExecutor(private val context: Context) {
 
     private val cancelledFlag = AtomicBoolean(false)
     private var activeAppShell: AppShell? = null
+    private val activeAppShells = Collections.synchronizedSet(
+        Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<AppShell, Boolean>())
+    )
 
     /** Interface callback untuk streaming output per baris. */
     interface LineCallback {
@@ -47,6 +52,10 @@ class ProcessExecutor(private val context: Context) {
     fun cancel() {
         cancelledFlag.set(true)
         activeAppShell?.killIfExecuting(context, false)
+        synchronized(activeAppShells) {
+            activeAppShells.forEach { it.killIfExecuting(context, false) }
+            activeAppShells.clear()
+        }
     }
 
     /** Reset flag cancel untuk sesi baru. */
@@ -129,31 +138,37 @@ class ProcessExecutor(private val context: Context) {
         }
 
         activeAppShell = appShell
+        activeAppShells.add(appShell)
 
-        // Tunggu selesai (dengan timeout opsional)
-        val finished = if (timeoutSeconds > 0) {
-            done.await(timeoutSeconds, TimeUnit.SECONDS)
-        } else {
-            done.await()
+        try {
+            // Tunggu selesai (dengan timeout opsional)
+            val finished: Boolean = if (timeoutSeconds > 0) {
+                done.await(timeoutSeconds, TimeUnit.SECONDS)
+            } else {
+                // CountDownLatch.await() tanpa argumen mengembalikan void,
+                // jadi tunggu lalu anggap selesai.
+                done.await()
+                true
+            }
+
+            if (!finished) {
+                // Timeout — batal
+                cancelledFlag.set(true)
+                appShell.killIfExecuting(context, false)
+                return CommandResult(-1, stdout.toString(), stderr.toString() + "\n[timeout after ${timeoutSeconds}s]",
+                    cancelled = true, durationMs = System.currentTimeMillis() - startTime)
+            }
+
+            if (cancelledFlag.get()) {
+                return CommandResult(-1, stdout.toString(), stderr.toString(), cancelled = true, durationMs = System.currentTimeMillis() - startTime)
+            }
+
+            val exitCode = executionCommand.resultData.exitCode ?: -1
+            return CommandResult(exitCode, stdout.toString(), stderr.toString(), durationMs = System.currentTimeMillis() - startTime)
+        } finally {
+            activeAppShells.remove(appShell)
+            if (activeAppShell === appShell) activeAppShell = null
         }
-
-        val duration = System.currentTimeMillis() - startTime
-
-        if (!finished) {
-            // Timeout — batal
-            cancelledFlag.set(true)
-            appShell.killIfExecuting(context, false)
-            return CommandResult(-1, stdout.toString(), stderr.toString() + "\n[timeout after ${timeoutSeconds}s]",
-                cancelled = true, durationMs = duration)
-        }
-
-        if (cancelledFlag.get()) {
-            return CommandResult(-1, stdout.toString(), stderr.toString(), cancelled = true, durationMs = duration)
-        }
-
-        val exitCode = executionCommand.resultData.exitCode ?: -1
-        activeAppShell = null
-        return CommandResult(exitCode, stdout.toString(), stderr.toString(), durationMs = duration)
     }
 
     /**

@@ -35,9 +35,9 @@ class ProjectScanner(
     /**
      * Scan storage untuk project Android & native.
      * @param rootPath path yang discan; null -> [scanRoot]
-     * @param maxDepth kedalaman maksimum walk; 0 = tidak terbatas
+     * @param depth maksimum kedalaman walk; 0 = tidak terbatas
      */
-    fun scan(rootPath: String = scanRoot, maxDepth: Int = maxDepth): ProjectScanResult {
+    fun scan(rootPath: String = scanRoot, depth: Int = maxDepth): ProjectScanResult {
         val root = File(rootPath)
         if (!root.exists() || !root.isDirectory) {
             return ProjectScanResult(emptyList(), emptyList())
@@ -46,7 +46,7 @@ class ProjectScanner(
         val androidProjects = LinkedHashSet<String>()
         val nativeProjects = LinkedHashSet<String>()
 
-        walkFiles(root, depth = 0, maxDepth = if (maxDepth <= 0) Int.MAX_VALUE else maxDepth) { file ->
+        walkFiles(root, depth = 0, maxDepth = if (depth <= 0) Int.MAX_VALUE else depth) { file ->
             val relPath = file.absolutePath
             val parent = file.parentFile ?: return@walkFiles
 

@@ -24,9 +24,6 @@ class BackupManager(private val executor: ProcessExecutor) {
 
         /** Suffix file backup. */
         const val BACKUP_SUFFIX = ".builder.bak"
-
-        /** Direktori backup file yang di-patch (di state dir). */
-        val PATCH_BACKUP_DIR: String get() = "${BuilderPaths.APP_STATE_DIR}/patch-backups"
     }
 
     /** Daftar file yang di-backup pada sesi ini (untuk rollback). */
@@ -38,7 +35,7 @@ class BackupManager(private val executor: ProcessExecutor) {
      */
     fun backupFileForPatch(file: File): File? {
         if (!file.exists()) return null
-        val backupDir = File(PATCH_BACKUP_DIR)
+        val backupDir = File(BuilderPaths.PATCH_BACKUP_DIR)
         backupDir.mkdirs()
 
         val safeName = file.absolutePath.replace('/', '_').removePrefix("_")
@@ -73,12 +70,12 @@ class BackupManager(private val executor: ProcessExecutor) {
     /** Cari file backup untuk file tertentu. */
     fun getBackupFileFor(file: File): File? {
         val safeName = file.absolutePath.replace('/', '_').removePrefix("_")
-        return File(PATCH_BACKUP_DIR, "$safeName$BACKUP_SUFFIX").takeIf { it.exists() }
+        return File(BuilderPaths.PATCH_BACKUP_DIR, "$safeName$BACKUP_SUFFIX").takeIf { it.exists() }
     }
 
     /** Bersihkan semua backup patch lama. */
     fun clearPatchBackups() {
-        File(PATCH_BACKUP_DIR).deleteRecursively()
+        File(BuilderPaths.PATCH_BACKUP_DIR).deleteRecursively()
     }
 
     /**

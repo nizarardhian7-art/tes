@@ -162,6 +162,9 @@ object BuilderPaths {
     /** File "last project" (persistensi menu). */
     const val LAST_PROJECT_FILE = APP_STATE_DIR + "/last_project.txt"
 
+    /** Direktori backup file Gradle yang dipatch sebelum diubah (untuk rollback). */
+    const val PATCH_BACKUP_DIR = APP_STATE_DIR + "/patch-backups"
+
     /** $HOME/android-sdk */
     const val DEFAULT_SDK_DIR = BuilderPathsInternal.TERMUX_HOME_DIR_PATH + "/android-sdk"
 

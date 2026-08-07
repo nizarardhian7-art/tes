@@ -13,7 +13,7 @@ import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
-import com.termux.app.R
+import com.termux.R
 import com.termux.builder.exec.ProcessExecutor
 import com.termux.builder.model.BuildConfig
 import com.termux.builder.model.BuildMode
@@ -53,6 +53,9 @@ class BuildForegroundService : Service() {
         @Volatile
         var lastResult: BuildResult? = null
 
+        @Volatile
+        private var buildingFlag = false
+
         fun startBuild(context: Context, projectPath: String, mode: BuildMode) {
             val intent = Intent(context, BuildForegroundService::class.java).apply {
                 action = ACTION_START_BUILD
@@ -70,7 +73,7 @@ class BuildForegroundService : Service() {
         }
 
         fun isBuilding(): Boolean {
-            return lastResult == null
+            return buildingFlag
         }
     }
 
@@ -123,6 +126,8 @@ class BuildForegroundService : Service() {
 
         val config = BuildConfig(projectPath = projectPath, mode = mode)
         lastResult = null
+        buildingFlag = true
+        listener?.invoke(BuildProgress(BuildPhase.SCANNING, "Memulai build...", 1))
 
         executorService.execute {
             val executor = ProcessExecutor(this)
@@ -136,6 +141,7 @@ class BuildForegroundService : Service() {
 
             val result = orchestrator!!.buildApk(config)
             lastResult = result
+            buildingFlag = false
             currentProgress = BuildProgress(
                 if (result.success) BuildPhase.SUCCESS else
                     if (result.phase == BuildPhase.CANCELLED) BuildPhase.CANCELLED else BuildPhase.FAILED,
@@ -162,7 +168,7 @@ class BuildForegroundService : Service() {
                 "Build APK",
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "Progress build APK TermuxMod"
+                setDescription("Progress build APK TermuxMod")
                 setShowBadge(false)
             }
             notificationManager?.createNotificationChannel(channel)
@@ -215,6 +221,7 @@ class BuildForegroundService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         orchestrator?.cancel()
+        buildingFlag = false
         wakeLock?.let {
             if (it.isHeld) it.release()
         }

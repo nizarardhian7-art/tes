@@ -298,7 +298,7 @@ class BuildOrchestrator(
             val summary = logParser.buildErrorSummary()
             return finish(BuildResult.failure(BuildPhase.FAILED,
                 "Build gagal (exit ${buildResult.exitCode})",
-                summary = summary.errorLines.joinToString("\n").ifBlank { buildResult.stderr.take(500) },
+                summary = summary.lines.joinToString("\n").ifBlank { buildResult.stderr.take(500) },
                 elapsed = (System.currentTimeMillis() - startTime) / 1000))
         } catch (e: Exception) {
             return finish(BuildResult.failure(BuildPhase.FAILED, "Exception: ${e.message}"))

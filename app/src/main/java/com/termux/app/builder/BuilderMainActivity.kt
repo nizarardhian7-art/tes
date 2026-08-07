@@ -2,7 +2,7 @@ package com.termux.app.builder
 
 import android.os.Bundle
 import androidx.appcompat.app.AppCompatActivity
-import com.termux.app.R
+import com.termux.R
 
 /**
  * Entry point UI builder (native, bukan terminal).

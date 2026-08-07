@@ -2,11 +2,11 @@ package com.termux.builder.orchestrator
 
 import com.termux.builder.exec.ProcessExecutor
 import com.termux.builder.model.BuildConfig
+import com.termux.builder.model.BuildPhase
 import com.termux.builder.model.BuildProgress
 import com.termux.builder.model.BuildResult
 import com.termux.builder.model.BuilderPaths
 import com.termux.builder.model.HardwareProfile
-import com.termux.builder.patch.GradleProjectPatcher
 import com.termux.builder.sync.WorkspaceSync
 import com.termux.builder.toolchain.ToolchainManager
 import java.io.File
@@ -19,7 +19,6 @@ import java.io.File
  * -> eksekusi cmake+ninja ATAU ndk-build -> kumpulkan .so/binary ke output.
  */
 class NativeBuildEngine(
-    private val context: android.content.Context,
     private val executor: ProcessExecutor,
     private val toolchainManager: ToolchainManager,
     private val workspaceSync: WorkspaceSync,
@@ -28,9 +27,6 @@ class NativeBuildEngine(
 
     companion object {
         private const val LOG_TAG = "NativeBuildEngine"
-
-        private val OUTPUT_EXTENSIONS = listOf(".so")
-        private val OUTPUT_EXECUTABLE_PATTERN = Regex(".*")
     }
 
     /**
@@ -43,13 +39,13 @@ class NativeBuildEngine(
         val startTime = System.currentTimeMillis()
         val projectName = File(sourcePath).name
 
-        progress(BuildProgress(com.termux.builder.model.BuildPhase.SYNCING, "Synchronizing workspace...", 5))
+        progress(BuildProgress(BuildPhase.SYNCING, "Synchronizing workspace...", 5))
         val workspaceDir = workspaceSync.sync(sourcePath, nativeMode = true)
         val projectRoot = File(workspaceDir)
 
         if (!toolchainManager.isNdkInstalled()) {
-            progress(BuildProgress(com.termux.builder.model.BuildPhase.TOOLCHAIN_SETUP, "NDK belum terinstall, setup toolchain...", 10))
-            toolchainManager.setupToolchain(profile) { msg -> /* progress toolchain */ }
+            progress(BuildProgress(BuildPhase.TOOLCHAIN_SETUP, "NDK belum terinstall, setup toolchain...", 10))
+            toolchainManager.setupToolchain(profile) { msg -> progress(BuildProgress(BuildPhase.TOOLCHAIN_SETUP, msg, 10)) }
         }
 
         // Deteksi build system
@@ -59,17 +55,17 @@ class NativeBuildEngine(
 
         if (!hasCMake && !hasAndroidMk) {
             return BuildResult.failure(
-                com.termux.builder.model.BuildPhase.FAILED,
+                BuildPhase.FAILED,
                 "Tidak ada CMakeLists.txt atau Android.mk di $sourcePath"
             )
         }
 
-        progress(BuildProgress(com.termux.builder.model.BuildPhase.BUILDING, "Menjalankan native build...", 30))
+        progress(BuildProgress(BuildPhase.BUILDING, "Menjalankan native build...", 30))
         val outputLog = StringBuilder()
         val lineHandler = { line: String ->
             outputLog.append(line).append('\n')
             progress(BuildProgress(
-                com.termux.builder.model.BuildPhase.BUILDING,
+                BuildPhase.BUILDING,
                 line.take(200),
                 30 + (parsePercent(line) ?: 0) / 5
             ))
@@ -83,13 +79,13 @@ class NativeBuildEngine(
         }
 
         if (executor.isCancelled) {
-            return BuildResult(false, com.termux.builder.model.BuildPhase.CANCELLED, "Native build dibatalkan",
+            return BuildResult(false, BuildPhase.CANCELLED, "Native build dibatalkan",
                 elapsedSeconds = (System.currentTimeMillis() - startTime) / 1000)
         }
 
         if (!buildOk) {
             return BuildResult.failure(
-                com.termux.builder.model.BuildPhase.FAILED,
+                BuildPhase.FAILED,
                 "Native build gagal",
                 summary = outputLog.toString().lines().filter { it.contains("error", ignoreCase = true) }.take(10).joinToString("\n"),
                 elapsed = (System.currentTimeMillis() - startTime) / 1000
@@ -97,7 +93,7 @@ class NativeBuildEngine(
         }
 
         // Kumpulkan output .so / executable
-        progress(BuildProgress(com.termux.builder.model.BuildPhase.COPYING, "Mengumpulkan output...", 90))
+        progress(BuildProgress(BuildPhase.COPYING, "Mengumpulkan output...", 90))
         val outDir = File(BuilderPaths.DEFAULT_OUTPUT_DIR, "Native/$projectName")
         outDir.mkdirs()
         var collected = 0
@@ -116,10 +112,10 @@ class NativeBuildEngine(
             }
 
         val elapsed = (System.currentTimeMillis() - startTime) / 1000
-        progress(BuildProgress(com.termux.builder.model.BuildPhase.SUCCESS, "Native build sukses: $collected file", 100))
+        progress(BuildProgress(BuildPhase.SUCCESS, "Native build sukses: $collected file", 100))
         return BuildResult(
             success = true,
-            phase = com.termux.builder.model.BuildPhase.SUCCESS,
+            phase = BuildPhase.SUCCESS,
             message = "Native build successful ($collected file)",
             nativeOutputDir = outDir.absolutePath,
             elapsedSeconds = elapsed

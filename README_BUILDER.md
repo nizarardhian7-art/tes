@@ -170,3 +170,28 @@ grep builder-core app/build.gradle settings.gradle
 # Plugin Kotlin di root
 grep kotlin-gradle-plugin build.gradle
 ```
+
+---
+
+## Changelog — Perbaikan Kompilasi (v2)
+
+### Error yang diperbaiki (laporan 123 error → 0)
+
+| # | File | Error | Perbaikan |
+|---|------|-------|-----------|
+| 1 | `builder-core/.../model/Models.kt` | `PATCH_BACKUP_DIR` tidak ada di `BuilderPaths` | Konstanta `PATCH_BACKUP_DIR` ditambahkan ke `BuilderPaths` (`APP_STATE_DIR/patch-backups`); `BackupManager` kini memakai konstanta yang sama (hapus duplikat) |
+| 2 | `builder-core/.../exec/ProcessExecutor.kt` | `!finished` (operator `not`) — `CountDownLatch.await()` tanpa argumen mengembalikan `void` di Java, jadi tipe `finished` bukan `Boolean` | Branch timeout diubah: `done.await()` → `true`; durasi dihitung sekali; `finally` untuk deregister AppShell; tambah `activeAppShells` set agar `cancel()` membunuh semua proses aktif |
+| 3 | `builder-core/.../orchestrator/BuildOrchestrator.kt` | `summary.errorLines` — field tidak ada | Diperbaiki menjadi `summary.lines` (sesuai `ErrorSummary` di `Models.kt`) |
+| 4 | `builder-core/.../orchestrator/NativeBuildEngine.kt` | `context` tidak dipakai; FQN `BuildPhase` berulang | Ditulis ulang: import `BuildPhase` langsung, parameter `context` dihapus (tidak dipakai siapa pun) |
+| 5 | `builder-core/.../patch/GradleProjectPatcher.kt` | `Pattern.find(CharSequence)` tidak ada; `groupValues`/`group` salah | `Pattern.compile(...).find(content)` → `.matcher(content).find()`; `m.group(0)` → `m.group()`; escape `$1` → `\$1` di `replaceAll` |
+| 6 | `builder-core/.../toolchain/ToolchainManager.kt` | **104 syntax error** — raw string `DUMMY_AIDL_SCRIPT` ditutup prematur oleh `"""` di dalam isi python (line 86), merusak parse seluruh file | **Ditulis ulang dari nol**: semua string dibangun dengan `buildString`/raw string aman; semua method yang dipakai `BuildOrchestrator`/`NativeBuildEngine` tersedia (`isSdkReady`, `isNdkInstalled`, `setupToolchain`, `downloadPlatformSdk`, `setupDummyBuildTools`, `setupDummyCmake`, `fixNdkPermissions`, `ensureWrapperTemplate`) |
+| 7 | `builder-core/.../scan/ProjectScanner.kt` | Default parameter `maxDepth: Int = maxDepth` merujuk dirinya sendiri (uninitialized) | Parameter di-rename `depth`; pemakaian internal konsisten |
+| 8 | `app/.../builder/*.kt` (4 file) | `import com.termux.app.R` — namespace app adalah `com.termux`, jadi R class yang benar adalah `com.termux.R` | Semua import diubah ke `com.termux.R` |
+| 9 | `app/.../builder/BuildDashboardFragment.kt` | `progressBar.progress = ...` — sintetis properti | Diubah ke setter eksplisit `setProgress()` |
+| 10 | `app/.../builder/BuildForegroundService.kt` | `description = ...` / `setShowBadge` properti sintetis; `isBuilding()` bug (true saat belum pernah build) | Setter eksplisit `setDescription()`/`setShowBadge()`; `isBuilding()` kini memakai `buildingFlag` eksplisit (set true saat mulai, false saat selesai/onDestroy) |
+
+### Verifikasi (tanpa `gradlew build`)
+
+- **Semua 13 file `builder-core`** di-compile dengan `kotlinc 2.2.20` terhadap stub Android + stub termux-shared → **exit 0, 0 error**.
+- **Semua 4 file `app/builder`** di-compile dengan `kotlinc 2.2.20` terhadap stub AndroidX + engine → **exit 0, 0 error**.
+- API yang dipakai (AppShell.execute, ExecutionCommand, ResultData, TermuxShellEnvironment, Logger) diverifikasi satu-per-satu terhadap **source termux-shared asli** di repo ini — semuanya cocok.

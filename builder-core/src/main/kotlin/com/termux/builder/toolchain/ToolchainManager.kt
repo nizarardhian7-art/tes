@@ -1,9 +1,11 @@
 package com.termux.builder.toolchain
 
+import android.content.Context
 import android.util.Base64
 import com.termux.builder.exec.ProcessExecutor
 import com.termux.builder.model.BuilderPaths
 import com.termux.builder.model.HardwareProfile
+import com.termux.shared.logger.Logger
 import java.io.File
 
 /**
@@ -18,7 +20,7 @@ import java.io.File
  * bisa dipantau via callback progress dan dibatalkan.
  */
 class ToolchainManager(
-    private val context: android.content.Context,
+    private val context: Context,
     private val executor: ProcessExecutor,
     private val sdkDir: String = BuilderPaths.DEFAULT_SDK_DIR,
     private val ndkVersion: String = BuilderPaths.DEFAULT_NDK_VERSION
@@ -57,8 +59,12 @@ class ToolchainManager(
             "lib/d8.jar", "lib/dx.jar", "lib/aapt2.jar", "lib/shrinkscript.jar"
         )
 
-        /** Konten AIDL dummy (python script dari build.sh). */
-        private val DUMMY_AIDL_SCRIPT = """#!/usr/bin/env python3
+        /**
+         * Konten AIDL dummy (python script dari build.sh).
+         * Script minimal yang meng-generate skeleton Java untuk interface aidl.
+         * Ditulis sebagai raw string: isi python TIDAK boleh mengandung `"""` ataupun `${`.
+         */
+        private val DUMMY_AIDL_SCRIPT: String = """#!/usr/bin/env python3
 import sys, os, re
 args = sys.argv[1:]
 out_dir, input_files = None, []
@@ -82,35 +88,56 @@ if out_dir:
             if iface:
                 tdir = os.path.join(out_dir, *pkg.split('.')) if pkg else out_dir
                 os.makedirs(tdir, exist_ok=True)
-                tjava = os.path.join(tdir, f"{iface}.java")
-                jcode = f"package {pkg};\npublic interface {iface} extends android.os.IInterface {{\n    public static abstract class Stub extends android.os.Binder implements {pkg}.{iface} {{\n        private static final java.lang.String DESCRIPTOR = \"{pkg}.{iface}\";\n        public Stub() {{ this.attachInterface(this, DESCRIPTOR); }}\n        public static {pkg}.{iface} asInterface(android.os.IBinder obj) {{\n            if (obj == null) return null;\n            android.os.IInterface iin = obj.queryLocalInterface(DESCRIPTOR);\n            if (iin != null && iin instanceof {pkg}.{iface}) return ({pkg}.{iface}) iin;\n            return new {pkg}.{iface}.Stub.Proxy(obj);\n        }}\n        @Override public android.os.IBinder asBinder() {{ return this; }}\n        private static class Proxy implements {pkg}.{iface} {{\n            private android.os.IBinder mRemote;\n            Proxy(android.os.IBinder remote) {{ mRemote = remote; }}\n            @Override public android.os.IBinder asBinder() {{ return mRemote; }}\n        }}\n    }}\n}}\n"""
+                tjava = os.path.join(tdir, iface + '.java')
+                jcode = 'package ' + pkg + ';\n\n' + \
+                        'public interface ' + iface + ' extends android.os.IInterface {\n' + \
+                        '    public static abstract class Stub extends android.os.Binder implements ' + pkg + '.' + iface + ' {\n' + \
+                        '        private static final java.lang.String DESCRIPTOR = "' + pkg + '.' + iface + '";\n' + \
+                        '        public Stub() { this.attachInterface(this, DESCRIPTOR); }\n' + \
+                        '        public static ' + pkg + '.' + iface + ' asInterface(android.os.IBinder obj) {\n' + \
+                        '            if (obj == null) return null;\n' + \
+                        '            android.os.IInterface iin = obj.queryLocalInterface(DESCRIPTOR);\n' + \
+                        '            if (iin != null && iin instanceof ' + pkg + '.' + iface + ') return (' + pkg + '.' + iface + ') iin;\n' + \
+                        '            return new ' + pkg + '.' + iface + '.Stub.Proxy(obj);\n' + \
+                        '        }\n' + \
+                        '        @Override public android.os.IBinder asBinder() { return this; }\n' + \
+                        '        private static class Proxy implements ' + pkg + '.' + iface + ' {\n' + \
+                        '            private android.os.IBinder mRemote;\n' + \
+                        '            Proxy(android.os.IBinder remote) { mRemote = remote; }\n' + \
+                        '            @Override public android.os.IBinder asBinder() { return mRemote; }\n' + \
+                        '        }\n' + \
+                        '    }\n' + \
+                        '}\n'
                 with open(tjava, 'w', encoding='utf-8') as f: f.write(jcode)
-        except Exception: pass
+        except Exception:
+            pass
 sys.exit(0)
 """
 
-        /** Template ~/.gradle/gradle.properties (dari build.sh auto_setup). */
-        private fun gradlePropertiesTemplate(profile: HardwareProfile): String = """
-android.aapt2FromMavenOverride=${BuilderPaths.PREFIX_BIN_DIR}/aapt2
-android.useAndroidX=true
-android.enableJetifier=true
-org.gradle.jvmargs=${profile.gradleJvmArgs}
-org.gradle.daemon=false
-org.gradle.parallel=false
-org.gradle.caching=true
-org.gradle.daemon.performance.disable-logging=true
-org.gradle.java.installations.auto-detect=false
-org.gradle.java.installations.auto-download=false
-org.gradle.java.installations.paths=${BuilderPaths.PREFIX_BIN_DIR}/../lib/jvm/java-17-openjdk
-org.gradle.native=false
-kotlin.compiler.execution.strategy=in-process
-kotlin.incremental=true
-android.builder.sdkDownload=false
-org.gradle.workers.max=${profile.maxWorkers}
-""".trimIndent() + "\n"
+        private const val DEFAULT_FRAMEWORK_AIDL: String = "interface java.lang.CharSequence;\n" +
+            "interface java.lang.String;\n" +
+            "parcelable android.accounts.Account;\n" +
+            "parcelable android.app.PendingIntent;\n" +
+            "parcelable android.content.ComponentName;\n" +
+            "parcelable android.content.Intent;\n" +
+            "parcelable android.content.IntentFilter;\n" +
+            "parcelable android.graphics.Bitmap;\n" +
+            "parcelable android.graphics.Rect;\n" +
+            "parcelable android.net.Uri;\n" +
+            "parcelable android.os.Bundle;\n" +
+            "parcelable android.os.ParcelFileDescriptor;\n" +
+            "parcelable android.os.ParcelUuid;\n" +
+            "parcelable android.os.PersistableBundle;\n" +
+            "parcelable android.view.KeyEvent;\n" +
+            "parcelable android.view.MotionEvent;\n"
     }
 
+    /** $SDK_DIR/ndk/<version> */
     val ndkDir: String get() = "$sdkDir/ndk/$ndkVersion"
+
+    // ---------------------------------------------------------------------
+    // Status checks
+    // ---------------------------------------------------------------------
 
     /** True bila SDK sudah siap (directory + license + platform 34). */
     fun isSdkReady(): Boolean {
@@ -123,8 +150,12 @@ org.gradle.workers.max=${profile.maxWorkers}
         return File("$ndkDir/ndk-build").exists() || File("$ndkDir/build/ndk-build").exists()
     }
 
+    // ---------------------------------------------------------------------
+    // Setup lengkap
+    // ---------------------------------------------------------------------
+
     /**
-     * Setup lengkap toolchain (auto_setup).
+     * Setup lengkap toolchain (pemetaan auto_setup() dari build.sh).
      * @param profile profil hardware untuk jvm args
      * @param progress callback pesan progress
      */
@@ -167,9 +198,14 @@ org.gradle.workers.max=${profile.maxWorkers}
         return true
     }
 
+    // ---------------------------------------------------------------------
+    // SDK layout & packages
+    // ---------------------------------------------------------------------
+
     private fun ensureStorageAccess() {
         // termux-setup-storage: membuat symlink ~/storage ke /sdcard
-        val storageLink = File("${BuilderPaths.DEFAULT_WORKSPACE_DIR}/../storage")
+        val homeDir = File(BuilderPaths.DEFAULT_HOME_DIR)
+        val storageLink = File(homeDir, "storage")
         if (!storageLink.exists()) {
             executor.executeShellCommand("termux-setup-storage -y 2>/dev/null || true")
         }
@@ -210,10 +246,37 @@ org.gradle.workers.max=${profile.maxWorkers}
 
     /** Tulis ~/.gradle/gradle.properties global. */
     private fun writeGlobalGradleProperties(profile: HardwareProfile) {
-        val gradleHome = File("${BuilderPaths.PREFIX_BIN_DIR}/../../.gradle")
+        val gradleHome = File(BuilderPaths.DEFAULT_HOME_DIR, ".gradle")
         gradleHome.mkdirs()
         File(gradleHome, "gradle.properties").writeText(gradlePropertiesTemplate(profile))
     }
+
+    /** Template ~/.gradle/gradle.properties (dari build.sh auto_setup). */
+    private fun gradlePropertiesTemplate(profile: HardwareProfile): String {
+        val javaHome = "${BuilderPaths.PREFIX_BIN_DIR}/../lib/jvm/java-17-openjdk"
+        return buildString {
+            append("android.aapt2FromMavenOverride=").append(BuilderPaths.PREFIX_BIN_DIR).append("/aapt2\n")
+            append("android.useAndroidX=true\n")
+            append("android.enableJetifier=true\n")
+            append("org.gradle.jvmargs=").append(profile.gradleJvmArgs).append('\n')
+            append("org.gradle.daemon=false\n")
+            append("org.gradle.parallel=false\n")
+            append("org.gradle.caching=true\n")
+            append("org.gradle.daemon.performance.disable-logging=true\n")
+            append("org.gradle.java.installations.auto-detect=false\n")
+            append("org.gradle.java.installations.auto-download=false\n")
+            append("org.gradle.java.installations.paths=").append(javaHome).append('\n')
+            append("org.gradle.native=false\n")
+            append("kotlin.compiler.execution.strategy=in-process\n")
+            append("kotlin.incremental=true\n")
+            append("android.builder.sdkDownload=false\n")
+            append("org.gradle.workers.max=").append(profile.maxWorkers).append('\n')
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Platform SDK
+    // ---------------------------------------------------------------------
 
     /** Download & ekstrak platform SDK untuk API level. */
     fun downloadPlatformSdk(apiLevel: Int): Boolean {
@@ -225,18 +288,22 @@ org.gradle.workers.max=${profile.maxWorkers}
             File("$sdkDir/platforms/$it").deleteRecursively()
         }
 
-        // Validasi platform yang sudah ada
-        if (androidJar.exists() && File(platformDir, "core-for-system-modules.jar").exists() &&
-            androidJar.length() != File(platformDir, "core-for-system-modules.jar").length()
-        ) {
-            platformDir.deleteRecursively()
-        } else if (androidJar.exists()) {
-            return true
+        // Validasi platform yang sudah ada: android.jar harus konsisten
+        // dengan core-for-system-modules.jar (cek ukuran) — build.sh memakai
+        // trick ini untuk mendeteksi platform corrupt.
+        if (androidJar.exists()) {
+            val coreJar = File(platformDir, "core-for-system-modules.jar")
+            if (coreJar.exists() && androidJar.length() != coreJar.length()) {
+                platformDir.deleteRecursively()
+            } else {
+                return true
+            }
         }
 
         val tmpZip = File("$sdkDir/platform-$apiLevel.zip")
         val tmpExtract = File("$sdkDir/platforms/tmp_extract")
-        tmpZip.deleteRecursively(); tmpExtract.deleteRecursively()
+        tmpZip.deleteRecursively()
+        tmpExtract.deleteRecursively()
         tmpExtract.mkdirs()
 
         // Download official
@@ -263,19 +330,19 @@ org.gradle.workers.max=${profile.maxWorkers}
             }
         }
 
-        tmpExtract.deleteRecursively(); tmpZip.deleteRecursively()
+        tmpExtract.deleteRecursively()
+        tmpZip.deleteRecursively()
 
         // Fallback: AOSP android.jar dari Reginer
-        progressOnly("Official download gagal, mencoba fallback AOSP platform...")
-        val fallbackDir = platformDir
-        fallbackDir.mkdirs()
+        Logger.logInfo(LOG_TAG, "Official download gagal, mencoba fallback AOSP platform...")
+        platformDir.mkdirs()
         val fb = executor.executeShellCommand(
-            "wget -q -O '${File(fallbackDir, "android.jar").absolutePath}' " +
+            "wget -q -O '${File(platformDir, "android.jar").absolutePath}' " +
                 "'https://github.com/Reginer/aosp-android-jar/raw/main/android-$apiLevel/android.jar' && echo OK || echo FAIL",
             timeoutSeconds = 600
         )
         if (fb.isSuccess && fb.stdout.contains("OK")) {
-            writePlatformSourceProperties(fallbackDir, apiLevel)
+            writePlatformSourceProperties(platformDir, apiLevel)
             return true
         }
         return false
@@ -289,6 +356,10 @@ org.gradle.workers.max=${profile.maxWorkers}
             aidl.writeText(DEFAULT_FRAMEWORK_AIDL)
         }
     }
+
+    // ---------------------------------------------------------------------
+    // Build-tools & CMake dummy
+    // ---------------------------------------------------------------------
 
     /** Buat build-tools dummy (symlink ke PREFIX/bin + dummy execs/jars). */
     fun setupDummyBuildTools(version: String) {
@@ -310,7 +381,9 @@ org.gradle.workers.max=${profile.maxWorkers}
 
         // dx -> d8
         if (File("${BuilderPaths.PREFIX_BIN_DIR}/d8").exists() && !File(btDir, "dx").exists()) {
-            executor.executeShellCommand("ln -sf '${BuilderPaths.PREFIX_BIN_DIR}/d8' '${File(btDir, "dx").absolutePath}'")
+            executor.executeShellCommand(
+                "ln -sf '${BuilderPaths.PREFIX_BIN_DIR}/d8' '${File(btDir, "dx").absolutePath}'"
+            )
         }
 
         // AIDL: symlink jika ada, else dummy python script
@@ -370,6 +443,10 @@ org.gradle.workers.max=${profile.maxWorkers}
         )
     }
 
+    // ---------------------------------------------------------------------
+    // NDK
+    // ---------------------------------------------------------------------
+
     /** Download & ekstrak NDK r25c (aarch64) bila belum ada. */
     private fun installNdk(progress: (String) -> Unit): Boolean {
         val ndkZip = File("$sdkDir/ndk.zip")
@@ -400,7 +477,8 @@ org.gradle.workers.max=${profile.maxWorkers}
 
         val extracted = tmpDir.listFiles()?.firstOrNull { it.isDirectory }
         if (extracted == null) {
-            ndkZip.deleteRecursively(); tmpDir.deleteRecursively()
+            ndkZip.deleteRecursively()
+            tmpDir.deleteRecursively()
             return false
         }
 
@@ -439,6 +517,10 @@ org.gradle.workers.max=${profile.maxWorkers}
         )
     }
 
+    // ---------------------------------------------------------------------
+    // Wrapper template
+    // ---------------------------------------------------------------------
+
     /** Siapkan wrapper template (gradlew + gradle-wrapper.jar + properties). */
     fun ensureWrapperTemplate(progress: (String) -> Unit) {
         val wrapperDir = File(BuilderPaths.DEFAULT_WRAPPER_DIR)
@@ -465,30 +547,5 @@ org.gradle.workers.max=${profile.maxWorkers}
                 timeoutSeconds = 600
             )
         }
-    }
-
-    /** Helper: kirim pesan progress tanpa mengubah status phase. */
-    private fun progressOnly(msg: String) {
-        com.termux.shared.logger.Logger.logInfo(LOG_TAG, msg)
-    }
-
-    companion object {
-        private const val DEFAULT_FRAMEWORK_AIDL = """interface java.lang.CharSequence;
-interface java.lang.String;
-parcelable android.accounts.Account;
-parcelable android.app.PendingIntent;
-parcelable android.content.ComponentName;
-parcelable android.content.Intent;
-parcelable android.content.IntentFilter;
-parcelable android.graphics.Bitmap;
-parcelable android.graphics.Rect;
-parcelable android.net.Uri;
-parcelable android.os.Bundle;
-parcelable android.os.ParcelFileDescriptor;
-parcelable android.os.ParcelUuid;
-parcelable android.os.PersistableBundle;
-parcelable android.view.KeyEvent;
-parcelable android.view.MotionEvent;
-"""
     }
 }

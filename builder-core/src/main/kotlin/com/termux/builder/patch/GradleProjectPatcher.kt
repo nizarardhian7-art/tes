@@ -34,8 +34,8 @@ class GradleProjectPatcher {
     fun detectAgpVersion(gradleFile: File): String? {
         if (!gradleFile.exists()) return null
         val content = gradleFile.readText()
-        val m = Pattern.compile("com\\.android\\.tools\\.build:gradle:([0-9.]+)").find(content)
-        return m?.groupValues?.get(1)
+        val m = Pattern.compile("com\\.android\\.tools\\.build:gradle:([0-9.]+)").matcher(content)
+        return if (m.find()) m.group(1) else null
     }
 
     /** Mapping AGP -> versi Gradle (fallback 8.7). */
@@ -63,9 +63,9 @@ class GradleProjectPatcher {
 
         // sourceCompatibility / targetCompatibility = 1x/2x (angka) -> JavaVersion.VERSION_17
         src = Pattern.compile("(?m)(sourceCompatibility|targetCompatibility)\\s*=\\s*['\"]?(1[5-9]|2[0-9])['\"]?")
-            .matcher(src).replaceAll("$1 = JavaVersion.VERSION_17")
+            .matcher(src).replaceAll("\$1 = JavaVersion.VERSION_17")
         src = Pattern.compile("(?m)(sourceCompatibility|targetCompatibility)\\s+['\"]?(1[5-9]|2[0-9])['\"]?")
-            .matcher(src).replaceAll("$1 JavaVersion.VERSION_17")
+            .matcher(src).replaceAll("\$1 JavaVersion.VERSION_17")
 
         // jvmTarget '2x' -> '17'
         src = Pattern.compile("jvmTarget\\s*=\\s*['\"]2[0-9]['\"]").matcher(src).replaceAll("jvmTarget = \"17\"")
@@ -75,12 +75,12 @@ class GradleProjectPatcher {
 
         // javaCompiler = ... (single line) -> comment
         src = Pattern.compile("(?im)^(\\s*javaCompiler\\s*=\\s*[^\\n]+)$").matcher(src)
-            .replaceAll("$1 // javaCompiler disabled")
+            .replaceAll("\$1 // javaCompiler disabled")
 
         // jvmToolchain { ... } -> comment (brace-aware)
         src = disableBraceBlock(src, "jvmToolchain", "/* jvmToolchain disabled */")
         src = Pattern.compile("(?im)^(\\s*jvmToolchain\\s*\\{[^\\n]*)$").matcher(src)
-            .replaceAll("$1 // jvmToolchain disabled")
+            .replaceAll("\$1 // jvmToolchain disabled")
 
         // toolchain { ... } block -> comment
         src = disableBraceBlock(src, "toolchain", "/* toolchain disabled */")
@@ -199,10 +199,10 @@ class GradleProjectPatcher {
         for (f in projectFiles) {
             if (!f.exists()) continue
             val content = f.readText()
-            val m = Pattern.compile("(compileSdk|compileSdkVersion)\\s*=?\\s*[0-9]+").find(content)
-            if (m != null) {
-                val num = Pattern.compile("[0-9]+").matcher(m.group(0))
-                if (num.find()) return num.group(0).toIntOrNull() ?: 34
+            val m = Pattern.compile("(compileSdk|compileSdkVersion)\\s*=?\\s*[0-9]+").matcher(content)
+            if (m.find()) {
+                val num = Pattern.compile("[0-9]+").matcher(m.group())
+                if (num.find()) return num.group().toIntOrNull() ?: 34
             }
         }
         return 34
@@ -213,10 +213,10 @@ class GradleProjectPatcher {
         for (f in projectFiles) {
             if (!f.exists()) continue
             val content = f.readText()
-            val m = Pattern.compile("buildToolsVersion\\s*=?\\s*['\"][0-9.]+['\"]").find(content)
-            if (m != null) {
-                val ver = Pattern.compile("[0-9.]+").matcher(m.group(0))
-                if (ver.find()) return ver.group(0)
+            val m = Pattern.compile("buildToolsVersion\\s*=?\\s*['\"][0-9.]+['\"]").matcher(content)
+            if (m.find()) {
+                val ver = Pattern.compile("[0-9.]+").matcher(m.group())
+                if (ver.find()) return ver.group()
             }
         }
         return null

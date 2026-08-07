@@ -11,7 +11,7 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.ViewModelProvider
-import com.termux.app.R
+import com.termux.R
 import com.termux.builder.model.BuildMode
 import com.termux.builder.model.BuildPhase
 import com.termux.builder.scan.ProjectScanner
@@ -89,7 +89,7 @@ class BuildDashboardFragment : Fragment() {
         viewModel.progress.observe(viewLifecycleOwner) { progress ->
             statusText.text = progress.phase.name.replace('_', ' ')
             messageText.text = progress.message
-            progressBar.progress = progress.percent
+            progressBar.setProgress(progress.percent)
             if (progress.detail.isNotBlank()) {
                 logText.text = progress.detail
             }
