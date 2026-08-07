@@ -1,0 +1,40 @@
+// TermuxMod Builder — :builder-core
+// Engine Kotlin murni untuk memindahkan logic build.sh ke kode Android native.
+// Module ini TIDAK bergantung pada UI (hanya AndroidX annotation untuk null-safety).
+plugins {
+    id "com.android.library"
+    id "org.jetbrains.kotlin.android"
+}
+
+android {
+    namespace "com.termux.builder"
+
+    compileSdkVersion project.properties.compileSdkVersion.toInteger()
+    ndkVersion = System.getenv("JITPACK_NDK_VERSION") ?: project.properties.ndkVersion
+
+    defaultConfig {
+        minSdkVersion project.properties.minSdkVersion.toInteger()
+        targetSdkVersion project.properties.targetSdkVersion.toInteger()
+        consumerProguardFiles "consumer-rules.pro"
+    }
+
+    compileOptions {
+        // Harus 1.8 agar bytecode library bisa dibaca module :app (Java 1.8)
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+
+    kotlinOptions {
+        jvmTarget = "1.8"
+    }
+}
+
+dependencies {
+    // Engine eksekusi shell programatik (AppShell / ExecutionCommand / TermuxShellEnvironment)
+    implementation project(":termux-shared")
+
+    implementation "androidx.annotation:annotation:1.9.0"
+    implementation "androidx.core:core:1.13.1"
+
+    testImplementation "junit:junit:4.13.2"
+}

@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- TermuxMod: wrapped ExtraKeysView in a HorizontalScrollView so the extra-keys
+     row can grow past one screen width without wrapping to a second row or
+     shrinking buttons. New keys can simply be appended to
+     TermuxPropertyConstants.DEFAULT_IVALUE_EXTRA_KEYS and the user scrolls
+     right to reach them. fillViewport keeps it full width when the row is
+     short, and scrollbars are hidden for a cleaner look. -->
+<HorizontalScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:layout_alignParentBottom="true"
+    android:scrollbars="none"
+    android:fillViewport="true"
+    android:overScrollMode="ifContentScrolls">
+
+    <com.termux.shared.termux.extrakeys.ExtraKeysView
+        android:id="@+id/terminal_toolbar_extra_keys"
+        style="?android:attr/buttonBarStyle"
+        android:layout_width="wrap_content"
+        android:layout_height="match_parent"
+        android:orientation="horizontal" />
+
+</HorizontalScrollView>

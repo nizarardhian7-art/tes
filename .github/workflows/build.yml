@@ -1,0 +1,139 @@
+name: Build APK
+
+# Satu workflow buat semua kebutuhan build:
+# - Push/PR ke master      -> build DEBUG APK
+# - GitHub Release publish -> build RELEASE APK + attach ke release
+# - Manual trigger         -> pilih sendiri debug atau release
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Jenis build'
+        required: true
+        default: 'debug'
+        type: choice
+        options:
+          - debug
+          - release
+      version:
+        description: 'Version name khusus build release manual (contoh: 0.118.3)'
+        required: false
+        default: ''
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+  release:
+    types:
+      - published
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      SIGNING_ALIAS: ${{ vars.SIGNING_ALIAS }}
+      SIGNING_STORE_PASS: ${{ vars.SIGNING_STORE_PASS }}
+      SIGNING_KEY_PASS: ${{ vars.SIGNING_KEY_PASS }}
+      SIGNING_KEY_PATH: ${{ vars.SIGNING_KEY_PATH }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      PACKAGE_VARIANT: apt-android-7
+
+    steps:
+      - name: Clone repository
+        uses: actions/checkout@v6
+
+      - name: Setup java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
+
+      - name: Tentukan jenis build (debug/release)
+        id: mode
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" == "release" ]; then
+            echo "type=release" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "type=${{ github.event.inputs.build_type }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "type=debug" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build APK
+        id: build
+        shell: bash {0}
+        run: |
+          exit_on_error() { echo "$1"; exit 1; }
+
+          BUILD_TYPE="${{ steps.mode.outputs.type }}"
+          echo "Jenis build: $BUILD_TYPE"
+
+          # Tentukan versi
+          if [ "$BUILD_TYPE" == "release" ] && [ "${{ github.event_name }}" == "release" ]; then
+            RELEASE_VERSION_NAME="${GITHUB_REF/refs\/tags\//}"
+          elif [ -n "${{ github.event.inputs.version }}" ]; then
+            RELEASE_VERSION_NAME="v${{ github.event.inputs.version }}"
+          else
+            CURRENT_VERSION_NAME_REGEX='\s+versionName "([^"]+)"$'
+            CURRENT_VERSION_NAME="$(grep -m 1 -E "$CURRENT_VERSION_NAME_REGEX" ./app/build.gradle | sed -r "s/$CURRENT_VERSION_NAME_REGEX/\1/")"
+            if [ "$BUILD_TYPE" == "debug" ] && [ "${{ github.event_name }}" != "workflow_dispatch" ]; then
+              RELEASE_VERSION_NAME="v$CURRENT_VERSION_NAME+${GITHUB_SHA:0:7}"
+            else
+              RELEASE_VERSION_NAME="v$CURRENT_VERSION_NAME"
+            fi
+          fi
+
+          APK_DIR_PATH="./app/build/outputs/apk/$BUILD_TYPE"
+          APK_VERSION_TAG="$RELEASE_VERSION_NAME-$PACKAGE_VARIANT-github-$BUILD_TYPE"
+          APK_BASENAME_PREFIX="termux-app_$APK_VERSION_TAG"
+
+          echo "APK_DIR_PATH=$APK_DIR_PATH" >> "$GITHUB_ENV"
+          echo "APK_BASENAME_PREFIX=$APK_BASENAME_PREFIX" >> "$GITHUB_ENV"
+          echo "RELEASE_VERSION_NAME=$RELEASE_VERSION_NAME" >> "$GITHUB_ENV"
+
+          export TERMUX_APP_VERSION_NAME="${RELEASE_VERSION_NAME/v/}"
+          export TERMUX_APK_VERSION_TAG="$APK_VERSION_TAG"
+          export TERMUX_PACKAGE_VARIANT="$PACKAGE_VARIANT"
+
+          if [ "$BUILD_TYPE" == "release" ]; then
+            ./gradlew assembleRelease || exit_on_error "Build release gagal."
+          else
+            ./gradlew assembleDebug || exit_on_error "Build debug gagal."
+          fi
+
+          if ! test -f "$APK_DIR_PATH/${APK_BASENAME_PREFIX}_arm64-v8a.apk"; then
+            files_found="$(ls "$APK_DIR_PATH")"
+            exit_on_error "APK tidak ditemukan di '$APK_DIR_PATH'. File yang ada: "$'\n'"$files_found"
+          fi
+
+          (cd "$APK_DIR_PATH"; sha256sum "${APK_BASENAME_PREFIX}_arm64-v8a.apk" > "${APK_BASENAME_PREFIX}_sha256sums") \
+            || exit_on_error "Gagal generate sha256sums."
+
+      - name: Upload APK sebagai artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ env.APK_BASENAME_PREFIX }}
+          path: |
+            ${{ env.APK_DIR_PATH }}/${{ env.APK_BASENAME_PREFIX }}_arm64-v8a.apk
+            ${{ env.APK_DIR_PATH }}/${{ env.APK_BASENAME_PREFIX }}_sha256sums
+            ${{ env.APK_DIR_PATH }}/output-metadata.json
+
+      - name: Attach APK ke GitHub Release
+        if: github.event_name == 'release'
+        shell: bash {0}
+        run: |
+          if ! hub release edit \
+            -m "" \
+            -a "$APK_DIR_PATH/${APK_BASENAME_PREFIX}_arm64-v8a.apk" \
+            -a "$APK_DIR_PATH/${APK_BASENAME_PREFIX}_sha256sums" \
+            "$RELEASE_VERSION_NAME"; then
+            echo "Gagal attach APK ke release"
+            exit 1
+          fi

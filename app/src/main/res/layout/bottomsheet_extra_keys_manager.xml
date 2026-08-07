@@ -1,0 +1,138 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:background="@color/black"
+    android:paddingBottom="16dp">
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:paddingStart="16dp"
+        android:paddingEnd="16dp"
+        android:paddingTop="16dp"
+        android:paddingBottom="2dp"
+        android:text="@string/extra_keys_manager_title"
+        android:textColor="@android:color/white"
+        android:textSize="16sp"
+        android:textStyle="bold" />
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:paddingStart="16dp"
+        android:paddingEnd="16dp"
+        android:paddingBottom="10dp"
+        android:text="@string/extra_keys_manager_hint"
+        android:textColor="#707070"
+        android:textSize="11sp" />
+
+    <androidx.core.widget.NestedScrollView
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:paddingStart="16dp"
+        android:paddingEnd="16dp">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+            <TextView
+                android:id="@+id/extra_keys_row1_header"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="ROW 1 - TOP TOOLBAR (Primary Actions)"
+                android:textColor="#FFA000"
+                android:textSize="10.5sp"
+                android:textStyle="bold"
+                android:layout_marginBottom="4dp" />
+
+            <androidx.recyclerview.widget.RecyclerView
+                android:id="@+id/extra_keys_row1_recycler_view"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:background="#141414"
+                android:padding="4dp"
+                android:layout_marginBottom="12dp" />
+
+            <TextView
+                android:id="@+id/extra_keys_row2_header"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="ROW 2 - BOTTOM TOOLBAR (Navigation &amp; Controls)"
+                android:textColor="#FFA000"
+                android:textSize="10.5sp"
+                android:textStyle="bold"
+                android:layout_marginBottom="4dp" />
+
+            <androidx.recyclerview.widget.RecyclerView
+                android:id="@+id/extra_keys_row2_recycler_view"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:background="#141414"
+                android:padding="4dp"
+                android:layout_marginBottom="14dp" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="AVAILABLE KEYS (Tap to add to active)"
+                android:textColor="#4CAF50"
+                android:textSize="10.5sp"
+                android:textStyle="bold"
+                android:layout_marginBottom="6dp" />
+
+            <com.google.android.material.chip.ChipGroup
+                android:id="@+id/extra_keys_available_chip_group"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="14dp" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/extra_keys_add_macro_button"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="+ Add Custom Macro Button"
+                android:textColor="#FFFFFF"
+                android:textSize="12sp"
+                android:backgroundTint="#222222"
+                app:strokeColor="#444444"
+                app:strokeWidth="1dp"
+                android:layout_marginBottom="16dp" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal">
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/extra_keys_reset_button"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:layout_marginEnd="6dp"
+                    android:text="Reset Default"
+                    android:textColor="#FFFFFF"
+                    android:backgroundTint="#333333" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/extra_keys_save_button"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:layout_marginStart="6dp"
+                    android:text="Save &amp; Apply"
+                    android:textColor="#000000"
+                    android:textStyle="bold"
+                    android:backgroundTint="#FFA000" />
+
+            </LinearLayout>
+
+        </LinearLayout>
+    </androidx.core.widget.NestedScrollView>
+
+</LinearLayout>

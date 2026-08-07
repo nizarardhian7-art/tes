@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- TermuxMod: added a back button next to the input so switching back to the
+     extra-keys grid is a tap (via TerminalToolbarViewPager wiring) instead of a
+     swipe gesture, which is easy to trigger by accident on a phone. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="horizontal">
+
+    <EditText
+        android:id="@+id/terminal_toolbar_text_input"
+        android:layout_width="0dp"
+        android:layout_height="match_parent"
+        android:layout_weight="1"
+        android:imeOptions="actionSend|flagNoFullscreen"
+        android:maxLines="1"
+        android:inputType="text"
+        android:importantForAutofill="no"
+        android:textColor="@android:color/white"
+        android:textColorHighlight="@android:color/darker_gray"
+        android:paddingTop="0dp"
+        android:textCursorDrawable="@null"
+        android:paddingBottom="0dp"
+        tools:ignore="LabelFor" />
+
+    <TextView
+        android:id="@+id/terminal_toolbar_text_input_back"
+        android:layout_width="wrap_content"
+        android:layout_height="match_parent"
+        android:gravity="center"
+        android:paddingStart="16dp"
+        android:paddingEnd="16dp"
+        android:text="⌫"
+        android:textColor="@android:color/white"
+        android:textSize="18sp"
+        android:contentDescription="@string/action_close_text_input"
+        style="?android:attr/buttonBarButtonStyle" />
+
+</LinearLayout>
