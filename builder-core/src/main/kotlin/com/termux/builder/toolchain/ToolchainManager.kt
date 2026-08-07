@@ -139,6 +139,29 @@ class ToolchainManager(
     /** $SDK_DIR/ndk/<version> — pakai versi yang terpasang bila ada. */
     val ndkDir: String get() = "$sdkDir/ndk/${installedNdkVersion() ?: ndkVersion}"
 
+    /**
+     * Alasan kegagalan TERAKHIR dari [setupToolchain] (atau sub-tahapnya bila
+     * dipanggil langsung). Selalu diisi pesan yang jelas dan spesifik — tidak
+     * pernah dibiarkan null saat sebuah tahap mengembalikan `false`, supaya
+     * UI tidak lagi menampilkan pesan generik "Setup toolchain gagal" tanpa
+     * detail.
+     */
+    var lastError: String? = null
+        private set
+
+    private fun fail(message: String): Boolean {
+        lastError = message
+        Logger.logError(LOG_TAG, message)
+        return false
+    }
+
+    /** Ringkas keluaran gagal (stderr diprioritaskan, fallback ke stdout) untuk pesan error. */
+    private fun tailOf(result: com.termux.builder.model.CommandResult, maxLen: Int = 300): String {
+        val text = result.stderr.ifBlank { result.stdout }.trim()
+        val lastLines = text.lines().filter { it.isNotBlank() }.takeLast(3).joinToString(" | ")
+        return lastLines.take(maxLen).ifBlank { "(exit ${result.exitCode}, tidak ada output)" }
+    }
+
     // ---------------------------------------------------------------------
     // Status checks
     // ---------------------------------------------------------------------
@@ -168,6 +191,7 @@ class ToolchainManager(
      * @param progress callback pesan progress
      */
     fun setupToolchain(profile: HardwareProfile, progress: (String) -> Unit): Boolean {
+        lastError = null
         // Line callback default: terima semua output live dari subprocess.
         val lineCb = object : ProcessExecutor.LineCallback {
             override fun onLine(line: String) {
@@ -175,12 +199,37 @@ class ToolchainManager(
             }
         }
 
+        // ---- 0. PREFLIGHT: bash & environment dasar harus ada dulu ----
+        val bashExists = File("${BuilderPaths.PREFIX_BIN_DIR}/bash").exists()
+        val shExists = File("${BuilderPaths.PREFIX_BIN_DIR}/sh").exists()
+        if (!bashExists && !shExists) {
+            return fail(
+                "Bootstrap Termux belum terpasang dengan benar: " +
+                    "${BuilderPaths.PREFIX_BIN_DIR}/bash tidak ditemukan. " +
+                    "Buka app ini sekali dan biarkan proses install bootstrap awal " +
+                    "(TermuxInstaller) selesai sebelum menjalankan setup toolchain."
+            )
+        }
+
         progress("Memastikan akses storage...")
         ensureStorageAccess(lineCb)
 
         progress("Menginstall paket sistem (APT)...")
         if (!installSystemPackages(progress, lineCb)) {
-            return false
+            return false // installSystemPackages sudah mengisi lastError
+        }
+
+        // ---- Verifikasi nyata: binary yang diinstall APT benar-benar ada ----
+        val criticalBins = listOf("wget", "curl", "unzip", "zip", "rsync", "dpkg", "cmake", "ninja", "python3")
+        val missing = executor.findMissingBinaries(criticalBins)
+        if (missing.isNotEmpty()) {
+            return fail(
+                "apt-get install melaporkan sukses, tapi binary berikut tetap tidak " +
+                    "ditemukan setelah install: ${missing.joinToString(", ")}. " +
+                    "Kemungkinan penyebab: repo APT Termux belum ter-set/unreachable, " +
+                    "atau tidak ada koneksi internet saat instalasi. Coba jalankan " +
+                    "'apt-get update' manual dari Termux shell app ini untuk melihat error aslinya."
+            )
         }
 
         progress("Membangun direktori SDK & target dummy...")
@@ -191,7 +240,7 @@ class ToolchainManager(
 
         progress("Mendownload platform SDK 34...")
         if (!downloadPlatformSdk(34, progress, lineCb)) {
-            return false
+            return false // downloadPlatformSdk sudah mengisi lastError
         }
 
         writeSdkLicense()
@@ -200,7 +249,7 @@ class ToolchainManager(
         if (!isNdkInstalled()) {
             progress("Mendownload Android NDK r25c (besar, mohon tunggu)...")
             if (!installNdk(progress, lineCb)) {
-                return false
+                return false // installNdk sudah mengisi lastError
             }
         } else {
             progress("NDK sudah terpasang.")
@@ -244,11 +293,14 @@ class ToolchainManager(
         val pkgList = APT_PACKAGES.joinToString(" ")
         progress("apt-get install $pkgList")
         val install = executor.executeShellCommand(
-            "apt-get install -y -o Dir::Cache::archives=$sdkDir/pkg-cache $pkgList 2>&1 | tail -n 10",
+            "apt-get install -y -o Dir::Cache::archives=$sdkDir/pkg-cache $pkgList",
             lineCallback = lineCb,
             timeoutSeconds = 1800
         )
-        return install.isSuccess
+        if (!install.isSuccess) {
+            return fail("apt-get install gagal (exit ${install.exitCode}): ${tailOf(install)}")
+        }
+        return true
     }
 
     /** Buat layout direktori SDK + cache dir. */
@@ -335,16 +387,22 @@ class ToolchainManager(
         tmpExtract.deleteRecursively()
         tmpExtract.mkdirs()
 
+        if (!executor.isExecutableAvailable("wget")) {
+            return fail("Tidak bisa download platform SDK: binary 'wget' tidak ditemukan di PREFIX/bin. Pastikan apt-get install wget sukses.")
+        }
+
         // Coba r01..r04
         var downloaded = false
+        var lastDl: com.termux.builder.model.CommandResult? = null
         for (revision in 1..4) {
             val url = "https://dl.google.com/android/repository/platform-${apiLevel}_r${revision.toString().padStart(2, '0')}.zip"
             progress("Mencoba download platform-$apiLevel r$revision...")
             val download = executor.executeShellCommand(
-                "wget -q -O '$tmpZip' '$url' 2>/dev/null && test -s '$tmpZip' && echo OK || echo FAIL",
+                "wget -O '$tmpZip' '$url' && test -s '$tmpZip' && echo OK || echo FAIL",
                 lineCallback = lineCb,
                 timeoutSeconds = 600
             )
+            lastDl = download
             if (download.isSuccess && download.stdout.contains("OK")) {
                 downloaded = true
                 break
@@ -378,7 +436,7 @@ class ToolchainManager(
         progress("Official download gagal — fallback AOSP android.jar...")
         platformDir.mkdirs()
         val fb = executor.executeShellCommand(
-            "wget -q -O '${File(platformDir, "android.jar").absolutePath}' " +
+            "wget -O '${File(platformDir, "android.jar").absolutePath}' " +
                 "'https://github.com/Reginer/aosp-android-jar/raw/main/android-$apiLevel/android.jar' && echo OK || echo FAIL",
             lineCallback = lineCb,
             timeoutSeconds = 900
@@ -387,7 +445,14 @@ class ToolchainManager(
             writePlatformSourceProperties(platformDir, apiLevel)
             return true
         }
-        return false
+        return fail(
+            "Download platform SDK android-$apiLevel gagal total (official r01-r04 maupun " +
+                "fallback AOSP). Alasan percobaan terakhir (official): ${lastDl?.let { tailOf(it) } ?: "-"}. " +
+                "Alasan fallback AOSP: ${tailOf(fb)}. Ini biasanya berarti TIDAK ADA KONEKSI " +
+                "INTERNET yang berfungsi dari dalam environment app, atau DNS/sertifikat SSL " +
+                "bermasalah — coba 'ping dl.google.com' dan 'wget https://google.com' manual di " +
+                "Termux shell app ini untuk konfirmasi."
+        )
     }
 
     private fun writePlatformSourceProperties(platformDir: File, apiLevel: Int) {
@@ -516,51 +581,50 @@ class ToolchainManager(
 
         progress("Mendownload NDK r29 (sekitar 400 MB, mohon tunggu)...")
         val dl = executor.executeShellCommand(
-            "wget -q --show-progress -O '$ndkZip' '$downloadUrl' 2>&1 && echo OK || echo FAIL",
+            "wget --show-progress -O '$ndkZip' '$downloadUrl' && echo OK || echo FAIL",
             lineCallback = lineCb,
             timeoutSeconds = 2400
         )
         if (!dl.isSuccess || !dl.stdout.contains("OK")) {
             progress("Gagal mendownload NDK (wget). Mencoba curl...")
             val dl2 = executor.executeShellCommand(
-                "curl -fsSL --retry 2 -o '$ndkZip' '$downloadUrl' 2>&1 && echo OK || echo FAIL",
+                "curl -fsSL --retry 2 -o '$ndkZip' '$downloadUrl' && echo OK || echo FAIL",
                 lineCallback = lineCb,
                 timeoutSeconds = 2400
             )
             if (!dl2.isSuccess || !dl2.stdout.contains("OK")) {
-                progress("Gagal mendownload NDK.")
-                return false
+                return fail("Download NDK gagal (wget & curl). wget: ${tailOf(dl)} | curl: ${tailOf(dl2)}")
             }
         }
 
         progress("Mengekstrak NDK (7z)...")
         // .7z memerlukan 7z (p7zip) — coba unzip dulu (zip), lalu 7z
         var ex: com.termux.builder.model.CommandResult = executor.executeShellCommand(
-            "unzip -q -o '$ndkZip' -d '$tmpDir' 2>/dev/null && echo OK || echo FAIL",
+            "unzip -o '$ndkZip' -d '$tmpDir' && echo OK || echo FAIL",
             lineCallback = lineCb,
             timeoutSeconds = 900
         )
         if (!ex.isSuccess || !ex.stdout.contains("OK")) {
             // Fallback 7z
             ex = executor.executeShellCommand(
-                "7z x -y -o'$tmpDir' '$ndkZip' >/dev/null 2>&1 && echo OK || echo FAIL",
+                "7z x -y -o'$tmpDir' '$ndkZip' && echo OK || echo FAIL",
                 lineCallback = lineCb,
                 timeoutSeconds = 900
             )
         }
         if (!ex.isSuccess || !ex.stdout.contains("OK")) {
-            progress("Gagal mengekstrak NDK.")
+            val reason = tailOf(ex)
             ndkZip.deleteRecursively()
-            return false
+            return fail("Gagal mengekstrak NDK (unzip/7z): $reason")
         }
 
         // Cari folder NDK di dalam tmp (bisa android-ndk-r29 / android-ndk-r25c)
         val extracted = findNdkRoot(tmpDir) ?: run {
             ndkZip.deleteRecursively()
             tmpDir.deleteRecursively()
-            progress("Folder NDK tidak ditemukan dalam arsip.")
-            return false
-        }
+            fail("Folder NDK (ndk-build) tidak ditemukan di dalam arsip yang diekstrak — arsip mungkin corrupt/tidak lengkap.")
+            null
+        } ?: return false
 
         File("$sdkDir/ndk").mkdirs()
         val target = File("$sdkDir/ndk/$actualVersion")

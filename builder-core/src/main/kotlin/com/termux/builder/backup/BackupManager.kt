@@ -2,6 +2,7 @@ package com.termux.builder.backup
 
 import com.termux.builder.exec.ProcessExecutor
 import com.termux.builder.model.BuilderPaths
+import com.termux.shared.logger.Logger
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -24,6 +25,20 @@ class BackupManager(private val executor: ProcessExecutor) {
 
         /** Suffix file backup. */
         const val BACKUP_SUFFIX = ".builder.bak"
+    }
+
+    /**
+     * Alasan kegagalan TERAKHIR dari export/import. Selalu diisi pesan spesifik
+     * ketika sebuah operasi mengembalikan null/false — sebelumnya semua error
+     * dibuang lewat `2>/dev/null` sehingga UI tidak pernah tahu penyebabnya.
+     */
+    var lastError: String? = null
+        private set
+
+    private fun tailOf(result: com.termux.builder.model.CommandResult, maxLen: Int = 300): String {
+        val text = result.stderr.ifBlank { result.stdout }.trim()
+        return text.lines().filter { it.isNotBlank() }.takeLast(3).joinToString(" | ")
+            .take(maxLen).ifBlank { "(exit ${result.exitCode}, tidak ada output)" }
     }
 
     /** Daftar file yang di-backup pada sesi ini (untuk rollback). */
@@ -82,13 +97,21 @@ class BackupManager(private val executor: ProcessExecutor) {
      * Export environment build lengkap ke ZIP di output dir.
      * @return path zip yang dihasilkan, atau null bila gagal
      */
-    fun exportEnvironmentBackup(sdkDir: String = BuilderPaths.DEFAULT_SDK_DIR): String? {
+    fun exportEnvironmentBackup(sdkDir: String = BuilderPaths.DEFAULT_SDK_DIR, lineCb: ProcessExecutor.LineCallback? = null): String? {
+        lastError = null
         val stage = File("${BuilderPaths.DEFAULT_HOME_DIR}/.backup-temp")
         stage.deleteRecursively()
         File(stage, "pkg-cache").mkdirs()
 
         val sdk = File(sdkDir)
-        if (!sdk.exists()) return null
+        if (!sdk.exists()) {
+            lastError = "SDK dir belum ada ($sdkDir) — jalankan setup toolchain dulu sebelum export."
+            return null
+        }
+        if (!executor.isExecutableAvailable("zip")) {
+            lastError = "Binary 'zip' tidak ditemukan. Jalankan 'apt-get install zip' dulu."
+            return null
+        }
 
         // rsync SDK (tanpa ndk)
         executor.executeShellCommand(
@@ -133,11 +156,16 @@ class BackupManager(private val executor: ProcessExecutor) {
         val zipPath = File(BuilderPaths.DEFAULT_OUTPUT_DIR, zipName)
         File(BuilderPaths.DEFAULT_OUTPUT_DIR).mkdirs()
         val result = executor.executeShellCommand(
-            "cd '${stage.absolutePath}' && zip -q -r '${zipPath.absolutePath}' . 2>/dev/null && echo OK || echo FAIL",
+            "cd '${stage.absolutePath}' && zip -r '${zipPath.absolutePath}' . && echo OK || echo FAIL",
+            lineCallback = lineCb,
             timeoutSeconds = 900
         )
         stage.deleteRecursively()
-        return if (result.isSuccess && result.stdout.contains("OK")) zipPath.absolutePath else null
+        if (!result.isSuccess || !result.stdout.contains("OK")) {
+            lastError = "Gagal membuat ZIP backup (exit ${result.exitCode}): ${tailOf(result)}"
+            return null
+        }
+        return zipPath.absolutePath
     }
 
     /**
@@ -158,56 +186,100 @@ class BackupManager(private val executor: ProcessExecutor) {
 
     /**
      * Import environment backup dari file ZIP spesifik (mis. dipilih via SAF).
-     * @return true bila berhasil
+     * @param lineCb opsional — bila diisi, setiap baris output unzip/rsync/dpkg
+     *   diteruskan live ke UI (panel log), bukan hanya hasil akhir true/false.
+     * @return true bila berhasil. Bila false, cek [lastError] untuk alasannya.
      */
-    fun importEnvironmentBackupFromFile(backup: File, sdkDir: String = BuilderPaths.DEFAULT_SDK_DIR): Boolean {
-        if (!backup.exists()) return false
+    fun importEnvironmentBackupFromFile(
+        backup: File,
+        sdkDir: String = BuilderPaths.DEFAULT_SDK_DIR,
+        lineCb: ProcessExecutor.LineCallback? = null
+    ): Boolean {
+        lastError = null
+
+        if (!backup.exists()) {
+            lastError = "File backup tidak ditemukan: ${backup.absolutePath}"
+            return false
+        }
+        if (backup.length() == 0L) {
+            lastError = "File backup kosong (0 byte): ${backup.absolutePath}"
+            return false
+        }
+        if (!executor.isExecutableAvailable("unzip")) {
+            lastError = "Binary 'unzip' tidak ditemukan. Jalankan setup toolchain / " +
+                "'apt-get install unzip' dulu sebelum import backup."
+            return false
+        }
 
         val restoreDir = File("${BuilderPaths.DEFAULT_HOME_DIR}/.restore-temp")
         restoreDir.deleteRecursively()
         restoreDir.mkdirs()
 
         val extract = executor.executeShellCommand(
-            "unzip -q -o '${backup.absolutePath}' -d '${restoreDir.absolutePath}/' 2>/dev/null && echo OK || echo FAIL",
+            "unzip -o '${backup.absolutePath}' -d '${restoreDir.absolutePath}/' && echo OK || echo FAIL",
+            lineCallback = lineCb,
             timeoutSeconds = 1800
         )
         if (!extract.isSuccess || !extract.stdout.contains("OK")) {
+            lastError = "Gagal ekstrak ZIP backup (exit ${extract.exitCode}): ${tailOf(extract)}. " +
+                "Cek apakah file '${backup.name}' adalah ZIP hasil export builder ini dan tidak corrupt."
             restoreDir.deleteRecursively()
             return false
         }
 
-        // Install .deb offline
+        // Sanity check: apakah isi ZIP memang berisi struktur backup yang diharapkan?
+        val hasKnownContent = listOf("pkg-cache", "android-sdk", ".gradle", "wrapper-template")
+            .any { File(restoreDir, it).exists() }
+        if (!hasKnownContent) {
+            lastError = "ZIP berhasil diekstrak tapi tidak berisi struktur backup yang dikenali " +
+                "(pkg-cache/android-sdk/.gradle/wrapper-template). Isi ZIP: " +
+                (restoreDir.listFiles()?.joinToString(", ") { it.name } ?: "(kosong)")
+            restoreDir.deleteRecursively()
+            return false
+        }
+
+        // Install .deb offline (best-effort, tidak fatal bila sebagian gagal — tapi dicatat)
         val pkgCache = File(restoreDir, "pkg-cache")
         val debs = pkgCache.listFiles()?.filter { it.extension == "deb" }
         if (!debs.isNullOrEmpty()) {
             val debArgs = debs.joinToString(" ") { "'${it.absolutePath}'" }
-            executor.executeShellCommand(
-                "dpkg -i --force-depends $debArgs 2>/dev/null || true",
+            val dpkgResult = executor.executeShellCommand(
+                "dpkg -i --force-depends $debArgs",
+                lineCallback = lineCb,
                 timeoutSeconds = 900
             )
+            if (!dpkgResult.isSuccess) {
+                Logger.logWarn(LOG_TAG, "dpkg -i sebagian gagal (non-fatal): ${tailOf(dpkgResult)}")
+            }
         }
 
         // Restore SDK (tanpa ndk — NDK di-restore dari archive terpisah)
         val sdkBackup = File(restoreDir, "android-sdk")
         if (sdkBackup.exists()) {
-            executor.executeShellCommand(
-                "rsync -a '${sdkBackup.absolutePath}/' '$sdkDir/' 2>/dev/null || true",
+            val r = executor.executeShellCommand(
+                "rsync -a '${sdkBackup.absolutePath}/' '$sdkDir/'",
+                lineCallback = lineCb,
                 timeoutSeconds = 900
             )
+            if (!r.isSuccess) Logger.logWarn(LOG_TAG, "restore android-sdk gagal (non-fatal): ${tailOf(r)}")
         }
         val gradleBackup = File(restoreDir, ".gradle")
         if (gradleBackup.exists()) {
-            executor.executeShellCommand(
-                "rsync -a '${gradleBackup.absolutePath}/' '${BuilderPaths.DEFAULT_HOME_DIR}/.gradle/' 2>/dev/null || true",
+            val r = executor.executeShellCommand(
+                "rsync -a '${gradleBackup.absolutePath}/' '${BuilderPaths.DEFAULT_HOME_DIR}/.gradle/'",
+                lineCallback = lineCb,
                 timeoutSeconds = 900
             )
+            if (!r.isSuccess) Logger.logWarn(LOG_TAG, "restore .gradle gagal (non-fatal): ${tailOf(r)}")
         }
         val wrapperBackup = File(restoreDir, "wrapper-template")
         if (wrapperBackup.exists()) {
-            executor.executeShellCommand(
-                "rsync -a '${wrapperBackup.absolutePath}/' '${BuilderPaths.DEFAULT_WRAPPER_DIR}/' 2>/dev/null || true",
+            val r = executor.executeShellCommand(
+                "rsync -a '${wrapperBackup.absolutePath}/' '${BuilderPaths.DEFAULT_WRAPPER_DIR}/'",
+                lineCallback = lineCb,
                 timeoutSeconds = 300
             )
+            if (!r.isSuccess) Logger.logWarn(LOG_TAG, "restore wrapper-template gagal (non-fatal): ${tailOf(r)}")
         }
 
         restoreDir.deleteRecursively()

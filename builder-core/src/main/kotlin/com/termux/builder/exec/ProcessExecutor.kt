@@ -250,9 +250,14 @@ class ProcessExecutor(private val context: Context) {
         timeoutSeconds: Long = 0
     ): CommandResult {
         val bashPath = TermuxShellUtils.getShellExecutablePath() ?: "/data/data/com.termux/files/usr/bin/bash"
+        // PENTING: tanpa 'pipefail', "apt-get install ... | tail -n 10" akan selalu
+        // melaporkan exit code dari 'tail' (hampir selalu 0) walau apt-get gagal total.
+        // Ini root cause utama kenapa toolchain setup "sukses palsu" lalu gagal di
+        // tahap berikutnya tanpa alasan yang jelas.
+        val safeCommand = "set -o pipefail; $command"
         return execute(
             bashPath,
-            arrayOf("-c", command),
+            arrayOf("-c", safeCommand),
             workingDirectory,
             environment = environment,
             lineCallback = lineCallback,
@@ -264,6 +269,21 @@ class ProcessExecutor(private val context: Context) {
     fun isExecutableAvailable(binary: String): Boolean {
         val result = executeShellCommand("command -v $binary >/dev/null 2>&1 && echo FOUND || echo MISSING")
         return result.isSuccess && result.stdout.contains("FOUND")
+    }
+
+    /**
+     * Cek daftar binary sekaligus, kembalikan yang HILANG saja.
+     * Dipakai untuk preflight check sebelum tahap yang bergantung pada binary
+     * tersebut (mis. wget/unzip/apt), supaya kegagalan dilaporkan dengan jelas
+     * di awal, bukan menyebabkan serangkaian kegagalan diam-diam di belakang.
+     */
+    fun findMissingBinaries(binaries: List<String>): List<String> {
+        if (binaries.isEmpty()) return emptyList()
+        val check = binaries.joinToString(" ") { b ->
+            "command -v $b >/dev/null 2>&1 || echo $b"
+        }
+        val result = executeShellCommand(check, timeoutSeconds = 30)
+        return result.stdout.lines().map { it.trim() }.filter { it.isNotBlank() }
     }
 
     /** Baca file teks via shell (cat). */

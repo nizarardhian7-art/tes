@@ -56,13 +56,31 @@ class WorkspaceSync(private val executor: ProcessExecutor) {
         val excludeArgs = excludes.joinToString(" ") { "--exclude='$it'" }
 
         if (isRsyncAvailable()) {
-            executor.executeShellCommand(
+            val result = executor.executeShellCommand(
                 "rsync -a --delete $excludeArgs '${sourcePath}/' '${targetDir.absolutePath}/'",
                 timeoutSeconds = 600
             )
+            if (!result.isSuccess) {
+                // JANGAN diam-diam lanjut dengan workspace yang mungkin kosong/parsial —
+                // sebelumnya hasil rsync tidak pernah dicek sama sekali di sini.
+                throw IllegalStateException(
+                    "rsync sinkronisasi workspace gagal (exit ${result.exitCode}): " +
+                        result.stderr.ifBlank { result.stdout }.trim().takeLast(300)
+                )
+            }
         } else {
             // Fallback: copy manual dengan exclude (pakai cp + find -delete)
             copyWithExcludes(File(sourcePath), targetDir, excludes)
+        }
+
+        // Verifikasi akhir: workspace tidak boleh kosong bila source-nya tidak kosong.
+        val sourceHasFiles = File(sourcePath).walkTopDown().any { it.isFile }
+        val targetHasFiles = targetDir.walkTopDown().any { it.isFile }
+        if (sourceHasFiles && !targetHasFiles) {
+            throw IllegalStateException(
+                "Sinkronisasi workspace menghasilkan folder kosong padahal source " +
+                    "'$sourcePath' berisi file. Cek permission storage."
+            )
         }
 
         return targetDir.absolutePath

@@ -98,15 +98,25 @@ class BuilderViewModel(application: Application) : AndroidViewModel(application)
     fun importBackup(filePath: String) {
         if (filePath.isBlank()) return
         _eventMessage.value = null
+        _logLine.postValue("► Mulai import backup: $filePath")
         Thread {
-            val ok = com.termux.builder.backup.BackupManager(
+            val backupManager = com.termux.builder.backup.BackupManager(
                 com.termux.builder.exec.ProcessExecutor(getApplication())
-            ).importEnvironmentBackupFromFile(File(filePath))
+            )
+            val liveLog = object : com.termux.builder.exec.ProcessExecutor.LineCallback {
+                override fun onLine(line: String) {
+                    if (line.isNotBlank()) _logLine.postValue(line)
+                }
+            }
+            val ok = backupManager.importEnvironmentBackupFromFile(File(filePath), lineCb = liveLog)
             val msg = if (ok) {
                 getApplication<Application>().getString(com.termux.R.string.builder_import_success)
             } else {
-                getApplication<Application>().getString(com.termux.R.string.builder_import_failed)
+                // Tampilkan ALASAN ASLI, bukan string generik — ini yang sebelumnya hilang.
+                val reason = backupManager.lastError ?: "Alasan tidak diketahui (lihat log di panel di atas)"
+                "${getApplication<Application>().getString(com.termux.R.string.builder_import_failed)}: $reason"
             }
+            _logLine.postValue(if (ok) "✓ $msg" else "✘ $msg")
             _eventMessage.postValue(Pair(msg, System.currentTimeMillis()))
         }.start()
     }
@@ -114,15 +124,24 @@ class BuilderViewModel(application: Application) : AndroidViewModel(application)
     /** Export backup environment ke output dir. */
     fun exportBackup() {
         _eventMessage.value = null
+        _logLine.postValue("► Mulai export backup environment...")
         Thread {
-            val zipPath = com.termux.builder.backup.BackupManager(
+            val backupManager = com.termux.builder.backup.BackupManager(
                 com.termux.builder.exec.ProcessExecutor(getApplication())
-            ).exportEnvironmentBackup()
+            )
+            val liveLog = object : com.termux.builder.exec.ProcessExecutor.LineCallback {
+                override fun onLine(line: String) {
+                    if (line.isNotBlank()) _logLine.postValue(line)
+                }
+            }
+            val zipPath = backupManager.exportEnvironmentBackup(lineCb = liveLog)
             val msg = if (zipPath != null) {
                 getApplication<Application>().getString(com.termux.R.string.builder_export_success, zipPath)
             } else {
-                getApplication<Application>().getString(com.termux.R.string.builder_export_failed)
+                val reason = backupManager.lastError ?: "Alasan tidak diketahui (lihat log di panel di atas)"
+                "${getApplication<Application>().getString(com.termux.R.string.builder_export_failed)}: $reason"
             }
+            _logLine.postValue(if (zipPath != null) "✓ $msg" else "✘ $msg")
             _eventMessage.postValue(Pair(msg, System.currentTimeMillis()))
         }.start()
     }

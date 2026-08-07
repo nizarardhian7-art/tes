@@ -117,7 +117,8 @@ class BuildOrchestrator(
                     progressCallback(BuildProgress(BuildPhase.TOOLCHAIN_SETUP, msg, 5, detail = msg))
                 }
                 if (!setupOk) {
-                    return finish(BuildResult.failure(BuildPhase.TOOLCHAIN_SETUP, "Setup toolchain gagal"))
+                    val reason = toolchainManager.lastError ?: "Setup toolchain gagal (alasan tidak diketahui — lihat log di atas)"
+                    return finish(BuildResult.failure(BuildPhase.TOOLCHAIN_SETUP, reason))
                 }
             }
 
