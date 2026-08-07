@@ -4,8 +4,8 @@ apply plugin: 'maven-publish'
 android {
     namespace = "com.termux.shared"
 
-    compileSdkVersion (project.findProperty("compileSdkVersion") ?: 36).toString().toInteger()
-    ndkVersion = System.getenv("JITPACK_NDK_VERSION") ?: (project.findProperty("ndkVersion") ?: "29.0.14206865")
+    compileSdk 36
+    ndkVersion = "29.0.14206865"
 
     dependencies {
         implementation "androidx.appcompat:appcompat:1.6.1"
@@ -32,9 +32,8 @@ android {
     }
 
     defaultConfig {
-        compileSdkVersion (project.findProperty("compileSdkVersion") ?: 36).toString().toInteger()
-        minSdkVersion (project.findProperty("minSdkVersion") ?: 21).toString().toInteger()
-        targetSdkVersion (project.findProperty("targetSdkVersion") ?: 28).toString().toInteger()
+        minSdk 21
+        targetSdk 28
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         externalNativeBuild {
             ndkBuild {

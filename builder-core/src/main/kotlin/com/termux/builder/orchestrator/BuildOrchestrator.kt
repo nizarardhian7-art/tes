@@ -240,6 +240,9 @@ class BuildOrchestrator(
             // ---- 7. PATCH GRADLE FILES (dengan backup) ----
             log(BuildPhase.PATCHING, BuildLog.step(7, 8, "Patching Gradle files (sanitize Java 17, inject SDK/NDK)..."), 30)
             val installedNdkVersion = toolchainManager.installedNdkVersion() ?: BuilderPaths.DEFAULT_NDK_VERSION
+            // v3: deteksi juga minSdk & targetSdk agar injection lengkap
+            val minSdk = patcher.detectMinSdk(gradleFiles)
+            val targetSdk = patcher.detectTargetSdk(gradleFiles)
 
             var patchedCount = 0
             var skippedCount = 0
@@ -252,7 +255,7 @@ class BuildOrchestrator(
                 var content = file.readText()
                 val original = content
                 content = patcher.sanitizeJava17(content)
-                content = patcher.injectSdkAndNdk(content, file.name.endsWith(".kts"), compileSdk, installedNdkVersion)
+                content = patcher.injectSdkAndNdk(content, file.name.endsWith(".kts"), compileSdk, installedNdkVersion, minSdk, targetSdk)
                 if (content != original) {
                     file.writeText(content)
                     patchedCount++

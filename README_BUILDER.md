@@ -54,12 +54,17 @@ termux-mod-builder/
 ├── terminal-emulator/  terminal-view/
 ├── settings.gradle      # + ':builder-core'
 ├── build.gradle         # + classpath kotlin-gradle-plugin:2.2.20
-└── gradle/wrapper/      # Gradle 9.2.1 (fork asli)
+└── gradle/wrapper/      # Gradle 8.13 (AGP 8.13.2 -> Gradle 8.13 minimum resmi)
 ```
 
-**Versi kunci:** AGP 8.13.2 · Gradle 9.2.1 · Kotlin Gradle Plugin **2.2.20** ·
+**Versi kunci:** AGP 8.13.2 · Gradle 8.13 · Kotlin Gradle Plugin **2.2.20** ·
 compileSdk 36 · minSdk 21 · Java 17 toolchain (bytecode library 1.8 agar konsumsi
 dari module Java 1.8 aman).
+
+> ⚠️ **v3: Gradle 9.2.1 TIDAK dipakai lagi.** AGP 8.13.x tidak kompatibel dengan
+> Gradle 9.x (AGP 8.x membutuhkan Gradle 8.x; Gradle 9 membutuhkan AGP 9.x).
+> Pasangan resmi & stabil: **AGP 8.13.2 + Gradle 8.13**. Ini menghindari error
+> "Unsupported value: 36" / "does not specify compileSdk" yang muncul di AGP 9.
 
 ---
 
@@ -351,3 +356,47 @@ grep kotlin-gradle-plugin build.gradle
 | CMake 3.22/3.18 | `android-sdk/cmake/<ver>/` | ~50 MB |
 | Gradle 8.13/9.2.1 | `.gradle/wrapper/dists/gradle-<ver>-bin/<hash>/` | ~130 MB |
 | Paket APT | `pkg-cache/*.deb` | bervariasi |
+
+---
+
+## v3.0 — Perbaikan 2026-08-08 (error build di CI/GitHub Actions)
+
+### Akar masalah
+User melaporkan build gagal di GitHub Actions (path `/home/runner/work/tes/tes/`):
+
+```
+FAILURE: Build completed with 2 failures.
+1: > Unsupported value: 36. Format must be one of:
+     - android-31 / android-36.2 / android-31-ext2 / android-36.2-ext2 / android-T
+2: > Android Gradle Plugin: project ':app' does not specify `compileSdk`
+```
+
+### Penyebab
+1. **`Unsupported value: 36`** — khas **AGP 9.x**: DSL lama `compileSdkVersion`
+   dihapus di AGP 9 dan diganti tipe `SdkVersion` (format `android-36.2`).
+   Menulis `compileSdkVersion 36` di AGP 9 → error ini.
+2. **`does not specify compileSdk`** — AGP 9 tidak mengenali `compileSdkVersion`
+   sebagai `compileSdk`, jadi project dianggap tidak punya compileSdk.
+3. **Wrapper Gradle 9.2.1 + AGP 8.13.2** — pasangan tidak kompatibel (AGP 8.x
+   butuh Gradle 8.x; Gradle 9 butuh AGP 9.x).
+4. **Injection patcher v2 tidak menangani expression**
+   `compileSdkVersion (project.findProperty("compileSdkVersion") ?: 36).toString().toInteger()`
+   dan tidak menghapus `compileSdkVersion` di dalam `defaultConfig`
+   (kasus `termux-shared/build.gradle:35`).
+
+### Perbaikan
+1. **DSL modern di semua module build.gradle** — `compileSdk 36` / `minSdk 21` /
+   `targetSdk 28` (tanpa suffix "Version") yang dikenali AGP 8.x MAUPUN AGP 9.x.
+   Tidak ada lagi `compileSdkVersion` / `minSdkVersion` / `targetSdkVersion`.
+2. **GradleProjectPatcher di-rewrite (brace-aware, line-aware)**:
+   - `compileSdk` hanya ditulis di level `android {}` (depth 0).
+   - Baris `compileSdkVersion`/`compileSdk` di dalam `defaultConfig`/`buildTypes`
+     DIHAPUS (tidak valid di sana).
+   - Expression `(project.findProperty(...) ?: 36).toString().toInteger()`
+     diganti SELURUH barisnya menjadi `compileSdk 36`.
+   - `minSdk`/`targetSdk` ditulis ulang di posisi asalnya (defaultConfig).
+   - `ndkVersion` ditulis di level android dengan format `ndkVersion = "..."`.
+3. **Wrapper diturunkan ke Gradle 8.13** (minimum resmi AGP 8.13.2) —
+   kompatibel & tersedia di cache offline.
+4. **sanitizeJava17** tidak merusak DSL modern (`compileSdk = 36`,
+   `JavaVersion.VERSION_17`).

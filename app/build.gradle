@@ -11,16 +11,17 @@ ext {
 android {
     namespace "com.termux"
 
-    // v2: gunakan findProperty agar tidak NPE bila key hilang dari gradle.properties
-    compileSdkVersion (project.findProperty("compileSdkVersion") ?: 36).toString().toInteger()
-    ndkVersion = System.getenv("JITPACK_NDK_VERSION") ?: (project.findProperty("ndkVersion") ?: "29.0.14206865")
+    // v3: DSL modern (compileSdk, bukan compileSdkVersion) — dikenali AGP 8.x & 9.x.
+    // compileSdkVersion dihapus di AGP 9 -> "Unsupported value: 36" + "does not specify compileSdk".
+    compileSdk 36
+    ndkVersion = "29.0.14206865"
     
     def appVersionName = System.getenv("TERMUX_APP_VERSION_NAME") ?: ""
     def apkVersionTag = System.getenv("TERMUX_APK_VERSION_TAG") ?: ""
 
     defaultConfig {
-        minSdkVersion (project.findProperty("minSdkVersion") ?: 21).toString().toInteger()
-        targetSdkVersion (project.findProperty("targetSdkVersion") ?: 28).toString().toInteger()
+        minSdk 21
+        targetSdk 28
         versionCode 118
         versionName "0.118.3"
 

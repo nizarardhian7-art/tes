@@ -14,6 +14,23 @@ import java.util.regex.Matcher
  * Keamanan:
  *  - Setiap file di-backup (.bak) sebelum diubah oleh [BackupManager]
  *  - Rollback mengembalikan file dari .bak
+ *
+ * v3 FIX (error "Unsupported value: 36" + "project ':app' does not specify compileSdk"):
+ *  - AGP 9.x menghapus DSL lama `compileSdkVersion` / `minSdkVersion` / `targetSdkVersion`
+ *    dan memperkenalkan tipe `SdkVersion` (format `android-36.2`). Menulis
+ *    `compileSdkVersion 36` di AGP 9 memunculkan:
+ *        "Unsupported value: 36. Format must be one of: android-31, android-36.2, ..."
+ *    lalu "project ':app' does not specify compileSdk in build.gradle".
+ *  - Solusi: tulis DSL MODERN `compileSdk 36` / `minSdk 21` / `targetSdk 28`
+ *    (tanpa suffix "Version") yang dikenali oleh AGP 8.x MAUPUN AGP 9.x.
+ *  - Injection sekarang brace-aware & line-aware:
+ *      * `compileSdk` hanya ditulis di level android{} (depth 0).
+ *      * Baris `compileSdkVersion`/`compileSdk` di dalam defaultConfig/buildTypes
+ *        DIHAPUS (tidak valid di sana — kasus termux-shared/build.gradle:35).
+ *      * `minSdk`/`targetSdk` ditulis ulang di posisi asalnya (defaultConfig).
+ *      * `ndkVersion` ditulis di level android{}.
+ *  - `(project.findProperty(...) ?: 36).toString().toInteger()` (expression)
+ *    diganti SELURUH BARISNYA menjadi `compileSdk 36` — bukan hanya keyword-nya.
  */
 class GradleProjectPatcher {
 
@@ -25,10 +42,21 @@ class GradleProjectPatcher {
          * Versi lama memakai mapping "ekspektasi" (8.4->8.7 dst) yang menurunkan
          * wrapper ke versi TERLALU LAMA untuk AGP 8.13.2 — itu membuat Gradle
          * mengunduh versi lama & gagal. Sekarang pakai MINIMUM yang dibutuhkan AGP.
+         *
+         * v3: AGP 8.x -> Gradle 8.x (AGP 8.13 -> Gradle 8.13, BUKAN 9.x).
+         *     AGP 9.x -> Gradle 9.x (AGP 9.0 -> Gradle 9.1.0 min).
+         *     Gradle 9.2.1 TIDAK kompatibel dengan AGP 8.13.x.
          */
         val AGP_TO_GRADLE: Map<String, String> = com.termux.builder.model.DependencyCatalog.AGP_MIN_GRADLE
 
         private val GRADLE_VERSION_RE = Pattern.compile("gradle-([0-9.]+)-(all|bin)\\.zip")
+
+        // Regex baris SDK properties (Groovy & KTS)
+        private val COMPILE_SDK_LINE = Regex("^(compileSdk|compileSdkVersion)\\s*(=|\\(|\\s)")
+        private val MIN_SDK_LINE = Regex("^(minSdk|minSdkVersion)\\s*(=|\\(|\\s)")
+        private val TARGET_SDK_LINE = Regex("^(targetSdk|targetSdkVersion)\\s*(=|\\(|\\s)")
+        private val NDK_VERSION_LINE = Regex("^ndkVersion\\s*(=|\\s)")
+        private val ANDROID_BLOCK_RE = Regex("(?m)^\\s*android\\s*\\{")
     }
 
     /** Deteksi versi AGP dari root build.gradle. */
@@ -56,10 +84,7 @@ class GradleProjectPatcher {
      *  - Nonaktifkan jvmToolchain / javaCompiler / toolchain block
      *
      * CATATAN v2: versi lama melakukan replaceAll yang "memakan" karakter baru
-     * di sekitar pattern dan merusak struktur (mis. `sourceCompatibility` diubah
-     * menjadi `sourceCompatibility = JavaVersion.VERSION_17` di file .kts padahal
-     * sintaksnya `sourceCompatibility = JavaVersion.VERSION_17` sudah benar, atau
-     * malah menghasilkan baris ganda). Semua replacement sekarang eksplisit &
+     * di sekitar pattern dan merusak struktur. Semua replacement sekarang eksplisit &
      * aman untuk Groovy maupun KTS.
      */
     fun sanitizeJava17(content: String): String {
@@ -108,12 +133,6 @@ class GradleProjectPatcher {
     /**
      * Nonaktifkan blok brace-aware: cari kata kunci di awal statement lalu
      * komentari seluruh blok hingga brace penutup seimbang.
-     *
-     * v2 FIX: versi lama mengganti seluruh baris dengan replacement + "\n"
-     * tanpa menghapus brace penutup yang tersisa di baris yang sama, dan loop
-     * pakai matcher pada StringBuilder yang dimutasi — menghasilkan baris
-     * patah / sintaks rusak. Sekarang komentar baris per baris sambil menjaga
-     * posisi penelusuran.
      */
     private fun disableBraceBlock(src: String, keyword: String, replacement: String): String {
         val sb = StringBuilder(src)
@@ -165,97 +184,132 @@ class GradleProjectPatcher {
     }
 
     /**
-     * Inject / update compileSdk & ndkVersion pada file Gradle.
+     * Inject / update compileSdk, minSdk, targetSdk & ndkVersion pada file Gradle.
      * Mendukung .gradle (Groovy) dan .gradle.kts.
      *
-     * v2 FIX (error "Unresolved reference: compileSdk" di settings.gradle.kts:25):
-     *  - Versi lama menyisipkan `compileSdk = 34` / `ndkVersion = "..."` DI LUAR
-     *    blok `android { }` (fallback insertIntoAndroidBlock menambahkan di akhir
-     *    file / di posisi yang salah), sehingga KTS meng-compile `compileSdk`
-     *    sebagai referensi variabel bebas -> unresolved.
-     *  - Sekarang penyisipan SELALU di dalam blok android { } yang sudah ada;
-     *    jika tidak ada blok android (mis. settings.gradle), file dilewati.
-     *  - Untuk KTS, ekspresi `compileSdk = 36` dan `ndkVersion = "29.0.14206865"`
-     *    divalidasi agar tidak menggandakan assignment.
+     * v3: menulis DSL modern yang kompatibel AGP 8.x & AGP 9.x:
+     *   Groovy: compileSdk 36 / minSdk 21 / targetSdk 28 / ndkVersion = "29.0.14206865"
+     *   KTS   : compileSdk = 36 / minSdk = 21 / targetSdk = 28 / ndkVersion = "29.0.14206865"
+     * `compileSdkVersion`/`minSdkVersion`/`targetSdkVersion` (DSL lama, dihapus di AGP 9)
+     * selalu ditulis ulang ke bentuk modern.
+     *
+     * Jika tidak ada blok android{} (mis. settings.gradle) file dikembalikan apa adanya.
      */
-    fun injectSdkAndNdk(content: String, isKts: Boolean, sdkVersion: Int, ndkVersion: String): String {
-        var src = content
-
-        // ---- compileSdk ----
-        if (isKts) {
-            // KTS: compileSdk = 36 (tanpa spasi atau dengan spasi)
-            if (Pattern.compile("(?m)^\\s*compileSdk\\s*=").matcher(src).find()) {
-                src = Pattern.compile("compileSdk\\s*=\\s*[0-9]+").matcher(src).replaceAll("compileSdk = $sdkVersion")
-            } else if (Pattern.compile("(?m)^\\s*compileSdkVersion\\s*=").matcher(src).find()) {
-                src = Pattern.compile("compileSdkVersion\\s*=\\s*[0-9]+").matcher(src).replaceAll("compileSdkVersion = $sdkVersion")
-            } else {
-                // Sisipkan DI DALAM blok android { } — bukan di akhir file!
-                src = insertIntoAndroidBlock(src, "    compileSdk = $sdkVersion", requireAndroidBlock = true) ?: return content
-            }
-        } else {
-            // Groovy: compileSdk 36 / compileSdkVersion 36 / = 36 / = expression
-            // v2: tangani semua bentuk termasuk "compileSdkVersion project.properties.xxx.toInteger()"
-            //     (dengan ATAU tanpa '=' — Groovy lama pakai spasi, modern pakai '=')
-            val groovyExpr = Pattern.compile(
-                "(?m)^\\s*compileSdkVersion\\s*=?\\s*([^\\n\\r]+)$"
-            ).matcher(src)
-            if (groovyExpr.find()) {
-                // Ganti seluruh baris (expression atau angka) dengan angka tetap.
-                // v2: quoteReplacement — `$` di $sdkVersion punya makna khusus di replaceAll!
-                src = groovyExpr.replaceAll(Matcher.quoteReplacement("compileSdkVersion $sdkVersion"))
-            } else if (Pattern.compile("(?m)^\\s*compileSdk\\s+[0-9]+").matcher(src).find()) {
-                src = Pattern.compile("compileSdk\\s+[0-9]+").matcher(src).replaceAll("compileSdk $sdkVersion")
-            } else if (Pattern.compile("(?m)^\\s*compileSdk\\s*=").matcher(src).find()) {
-                src = Pattern.compile("compileSdk\\s*=\\s*[0-9]+").matcher(src).replaceAll("compileSdk = $sdkVersion")
-            } else {
-                src = insertIntoAndroidBlock(src, "    compileSdk $sdkVersion", requireAndroidBlock = true) ?: return content
-            }
-        }
-
-        // ---- ndkVersion ----
-        if (isKts) {
-            if (Pattern.compile("(?m)^\\s*ndkVersion\\s*=").matcher(src).find()) {
-                src = Pattern.compile("ndkVersion\\s*=\\s*['\"][^'\"]+['\"]").matcher(src)
-                    .replaceAll("ndkVersion = \"$ndkVersion\"")
-            } else {
-                src = insertIntoAndroidBlock(src, "    ndkVersion = \"$ndkVersion\"", requireAndroidBlock = true) ?: return content
-            }
-        } else {
-            if (Pattern.compile("(?m)^\\s*ndkVersion\\s+['\"]").matcher(src).find()) {
-                src = Pattern.compile("ndkVersion\\s+['\"][^'\"]+['\"]").matcher(src)
-                    .replaceAll("ndkVersion \"$ndkVersion\"")
-            } else if (Pattern.compile("(?m)^\\s*ndkVersion\\s*=").matcher(src).find()) {
-                src = Pattern.compile("ndkVersion\\s*=\\s*['\"][^'\"]+['\"]").matcher(src)
-                    .replaceAll("ndkVersion = \"$ndkVersion\"")
-            } else {
-                src = insertIntoAndroidBlock(src, "    ndkVersion \"$ndkVersion\"", requireAndroidBlock = true) ?: return content
-            }
-        }
-
-        return src
+    fun injectSdkAndNdk(
+        content: String,
+        isKts: Boolean,
+        sdkVersion: Int,
+        ndkVersion: String,
+        minSdkVersion: Int = 21,
+        targetSdkVersion: Int = 28
+    ): String {
+        return rewriteAndroidBlock(content, isKts, sdkVersion, minSdkVersion, targetSdkVersion, ndkVersion)
+            ?: content
     }
 
     /**
-     * Sisipkan baris ke dalam blok android { ... } pertama.
+     * Tulis ulang isi blok android{...} baris-per-baris dengan depth tracking.
+     * Return null jika tidak ada blok android (pemanggil memutuskan untuk skip file).
      *
-     * v2 FIX: parameter [requireAndroidBlock] — jika blok android tidak ada,
-     * kembalikan null (pemanggil memutuskan: untuk settings.gradle / file non-module
-     * lebih baik TIDAK menyisipkan apa pun daripada merusak sintaks). Sebelumnya
-     * fallback menambahkan baris di akhir file yang menghasilkan
-     * "Unresolved reference: compileSdk" pada KTS.
+     * Aturan:
+     *  - depth 0 di dalam blok android = level `android { }` langsung.
+     *    compileSdk & ndkVersion HANYA valid di sini -> replace / inject.
+     *  - depth > 0 (defaultConfig, buildTypes, ...) = compileSdk TIDAK valid -> hapus baris.
+     *  - minSdk / targetSdk valid di defaultConfig (dan di level android) -> replace di mana pun.
      */
-    private fun insertIntoAndroidBlock(src: String, line: String, requireAndroidBlock: Boolean = false): String? {
-        val m = Pattern.compile("(?m)^(\\s*)(android\\s*\\{)").matcher(src)
-        if (m.find()) {
-            val insertPos = m.end()
-            // Jangan sisipkan jika line sudah ada persis di dalam blok (hindari duplikat)
-            val afterInsert = src.substring(m.end(), (src.indexOf("}", m.end()).takeIf { it > 0 } ?: src.length))
-            if (afterInsert.contains(line.trim())) {
-                return src
+    private fun rewriteAndroidBlock(
+        content: String,
+        isKts: Boolean,
+        compileSdk: Int,
+        minSdk: Int,
+        targetSdk: Int,
+        ndkVersion: String
+    ): String? {
+        val start = ANDROID_BLOCK_RE.find(content) ?: return null
+        val openIdx = content.indexOf('{', start.range.last)
+        if (openIdx == -1) return null
+
+        // Cari brace penutup blok android (balance-aware)
+        var depth = 0
+        var end = -1
+        var i = openIdx
+        while (i < content.length) {
+            when (content[i]) {
+                '{' -> depth++
+                '}' -> {
+                    depth--
+                    if (depth == 0) { end = i; break }
+                }
             }
-            return src.substring(0, insertPos) + "\n$line" + src.substring(insertPos)
+            i++
         }
-        return if (requireAndroidBlock) null else src.trimEnd() + "\n\n$line\n"
+        if (end == -1) return null
+
+        val before = content.substring(0, openIdx + 1) // termasuk "android {"
+        val after = content.substring(end)             // termasuk "}"
+        val blockLines = content.substring(openIdx + 1, end).split("\n")
+
+        val sb = StringBuilder()
+        var blockDepth = 0
+        var foundCompileSdk = false
+        var foundNdk = false
+
+        for (line in blockLines) {
+            val trimmed = line.trim()
+            val indent = line.takeWhile { it == ' ' || it == '\t' }
+            val depthBefore = blockDepth
+            blockDepth += trimmed.count { it == '{' } - trimmed.count { it == '}' }
+
+            val isCompileSdk = COMPILE_SDK_LINE.containsMatchIn(trimmed)
+            val isMinSdk = MIN_SDK_LINE.containsMatchIn(trimmed)
+            val isTargetSdk = TARGET_SDK_LINE.containsMatchIn(trimmed)
+            val isNdk = NDK_VERSION_LINE.containsMatchIn(trimmed)
+
+            when {
+                // compileSdk HANYA valid di level android (depth 0 di dalam blok)
+                isCompileSdk && depthBefore == 0 -> {
+                    sb.append(indent)
+                    if (isKts) sb.append("compileSdk = $compileSdk\n")
+                    else sb.append("compileSdk $compileSdk\n")
+                    foundCompileSdk = true
+                }
+                // compileSdk di dalam defaultConfig/buildTypes/... -> hapus (invalid)
+                isCompileSdk -> { /* skip line */ }
+
+                isMinSdk -> {
+                    sb.append(indent)
+                    if (isKts) sb.append("minSdk = $minSdk\n")
+                    else sb.append("minSdk $minSdk\n")
+                }
+                isTargetSdk -> {
+                    sb.append(indent)
+                    if (isKts) sb.append("targetSdk = $targetSdk\n")
+                    else sb.append("targetSdk $targetSdk\n")
+                }
+                isNdk && depthBefore == 0 -> {
+                    sb.append(indent)
+                    sb.append("ndkVersion = \"$ndkVersion\"\n")
+                    foundNdk = true
+                }
+                else -> sb.append(line).append("\n")
+            }
+        }
+
+        val blockContent = sb.toString()
+        val injectLines = StringBuilder()
+        if (!foundCompileSdk) {
+            if (isKts) injectLines.append("    compileSdk = $compileSdk\n")
+            else injectLines.append("    compileSdk $compileSdk\n")
+        }
+        if (!foundNdk) {
+            injectLines.append("    ndkVersion = \"$ndkVersion\"\n")
+        }
+
+        return if (injectLines.isEmpty()) {
+            before + blockContent + after
+        } else {
+            before + "\n" + injectLines.toString() + blockContent + after
+        }
     }
 
     /** Update versi Gradle di gradle-wrapper.properties. */
@@ -291,6 +345,48 @@ class GradleProjectPatcher {
             }
         }
         return 34
+    }
+
+    /** Deteksi minSdk dari file-file Gradle project (default 21). */
+    fun detectMinSdk(projectFiles: List<File>): Int {
+        for (f in projectFiles) {
+            if (!f.exists()) continue
+            val content = f.readText()
+            val m = Pattern.compile("(minSdkVersion|minSdk)\\s*=?\\s*([0-9]+)").matcher(content)
+            if (m.find()) {
+                return m.group(2).toIntOrNull() ?: 21
+            }
+        }
+        for (f in projectFiles) {
+            if (!f.exists() || f.name != "gradle.properties") continue
+            val content = f.readText()
+            val m = Pattern.compile("(?m)^\\s*minSdk(?:Version)?\\s*=\\s*([0-9]+)").matcher(content)
+            if (m.find()) {
+                return m.group(1).toIntOrNull() ?: 21
+            }
+        }
+        return 21
+    }
+
+    /** Deteksi targetSdk dari file-file Gradle project (default 28). */
+    fun detectTargetSdk(projectFiles: List<File>): Int {
+        for (f in projectFiles) {
+            if (!f.exists()) continue
+            val content = f.readText()
+            val m = Pattern.compile("(targetSdkVersion|targetSdk)\\s*=?\\s*([0-9]+)").matcher(content)
+            if (m.find()) {
+                return m.group(2).toIntOrNull() ?: 28
+            }
+        }
+        for (f in projectFiles) {
+            if (!f.exists() || f.name != "gradle.properties") continue
+            val content = f.readText()
+            val m = Pattern.compile("(?m)^\\s*targetSdk(?:Version)?\\s*=\\s*([0-9]+)").matcher(content)
+            if (m.find()) {
+                return m.group(1).toIntOrNull() ?: 28
+            }
+        }
+        return 28
     }
 
     /** Deteksi buildToolsVersion dari file-file Gradle (untuk setup dummy build-tools). */
