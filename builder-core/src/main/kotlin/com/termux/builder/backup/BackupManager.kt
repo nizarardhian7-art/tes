@@ -10,11 +10,6 @@ import java.util.Locale
 
 /**
  * Manager backup & rollback.
- *
- * Dua tanggung jawab:
- *  1. Backup file Gradle sebelum di-patch (.bak) + rollback ke kondisi asli.
- *  2. Export/import environment build lengkap (SDK, .gradle, wrapper-template,
- *     pkg-cache) — pemetaan dari build.sh export_backup() / import_backup().
  */
 class BackupManager(private val executor: ProcessExecutor) {
 
@@ -27,10 +22,6 @@ class BackupManager(private val executor: ProcessExecutor) {
         const val BACKUP_SUFFIX = ".builder.bak"
     }
 
-    /**
-     * Alasan kegagalan TERAKHIR dari export/import. Selalu diisi pesan spesifik
-     * ketika sebuah operasi mengembalikan null/false.
-     */
     var lastError: String? = null
         private set
 
@@ -40,13 +31,8 @@ class BackupManager(private val executor: ProcessExecutor) {
             .take(maxLen).ifBlank { "(exit ${result.exitCode}, tidak ada output)" }
     }
 
-    /** Daftar file yang di-backup pada sesi ini (untuk rollback). */
     private val backedUpFiles = ArrayList<File>()
 
-    /**
-     * Backup file sebelum dipatch. Menyimpan salinan ke state dir dengan nama
-     * hash path agar aman dari konflik.
-     */
     fun backupFileForPatch(file: File): File? {
         if (!file.exists()) return null
         val backupDir = File(BuilderPaths.PATCH_BACKUP_DIR)
@@ -63,7 +49,6 @@ class BackupManager(private val executor: ProcessExecutor) {
         }
     }
 
-    /** Rollback semua file yang di-backup pada sesi ini. */
     fun rollbackAll(): Int {
         var restored = 0
         for (file in backedUpFiles) {
@@ -81,21 +66,15 @@ class BackupManager(private val executor: ProcessExecutor) {
         return restored
     }
 
-    /** Cari file backup untuk file tertentu. */
     fun getBackupFileFor(file: File): File? {
         val safeName = file.absolutePath.replace('/', '_').removePrefix("_")
         return File(BuilderPaths.PATCH_BACKUP_DIR, "$safeName$BACKUP_SUFFIX").takeIf { it.exists() }
     }
 
-    /** Bersihkan semua backup patch lama. */
     fun clearPatchBackups() {
         File(BuilderPaths.PATCH_BACKUP_DIR).deleteRecursively()
     }
 
-    /**
-     * Export environment build lengkap ke ZIP di output dir.
-     * @return path zip yang dihasilkan, atau null bila gagal
-     */
     fun exportEnvironmentBackup(sdkDir: String = BuilderPaths.DEFAULT_SDK_DIR, lineCb: ProcessExecutor.LineCallback? = null): String? {
         lastError = null
         val stage = File("${BuilderPaths.DEFAULT_HOME_DIR}/.backup-temp")
@@ -112,13 +91,11 @@ class BackupManager(private val executor: ProcessExecutor) {
             return null
         }
 
-        // rsync SDK (tanpa ndk)
         executor.executeShellCommand(
             "rsync -a --exclude='ndk/' '${sdk.absolutePath}/' '${File(stage, "android-sdk").absolutePath}/'",
             timeoutSeconds = 900
         )
 
-        // .gradle home
         val gradleHome = File("${BuilderPaths.DEFAULT_HOME_DIR}/.gradle")
         if (gradleHome.exists()) {
             executor.executeShellCommand(
@@ -127,7 +104,6 @@ class BackupManager(private val executor: ProcessExecutor) {
             )
         }
 
-        // wrapper-template
         val wrapperDir = File(BuilderPaths.DEFAULT_WRAPPER_DIR)
         if (wrapperDir.exists()) {
             executor.executeShellCommand(
@@ -136,7 +112,6 @@ class BackupManager(private val executor: ProcessExecutor) {
             )
         }
 
-        // pkg-cache .deb
         val pkgCache = File("$sdkDir/pkg-cache")
         if (pkgCache.exists()) {
             pkgCache.listFiles()?.filter { it.extension == "deb" }?.forEach {
@@ -150,7 +125,6 @@ class BackupManager(private val executor: ProcessExecutor) {
             }
         }
 
-        // ZIP
         val zipName = "builder-backup-complete-${DATE_FORMAT.format(Date())}.zip"
         val zipPath = File(BuilderPaths.DEFAULT_OUTPUT_DIR, zipName)
         File(BuilderPaths.DEFAULT_OUTPUT_DIR).mkdirs()
@@ -167,10 +141,6 @@ class BackupManager(private val executor: ProcessExecutor) {
         return zipPath.absolutePath
     }
 
-    /**
-     * Import environment backup dari ZIP terbaru di output dir / sdcard.
-     * @return true bila berhasil
-     */
     fun importEnvironmentBackup(sdkDir: String = BuilderPaths.DEFAULT_SDK_DIR): Boolean {
         val outputDir = File(BuilderPaths.DEFAULT_OUTPUT_DIR)
         val candidates = ArrayList<File>()
@@ -182,10 +152,6 @@ class BackupManager(private val executor: ProcessExecutor) {
         return importEnvironmentBackupFromFile(backup, sdkDir)
     }
 
-    /**
-     * Import environment backup dari file ZIP spesifik.
-     * @return true bila berhasil.
-     */
     fun importEnvironmentBackupFromFile(
         backup: File,
         sdkDir: String = BuilderPaths.DEFAULT_SDK_DIR,
@@ -202,7 +168,6 @@ class BackupManager(private val executor: ProcessExecutor) {
             return false
         }
 
-        // Auto-install unzip & rsync jika belum ada
         if (!executor.isExecutableAvailable("unzip") || !executor.isExecutableAvailable("rsync")) {
             lineCb?.onLine("► Binary 'unzip'/'rsync' belum ada. Memasang via APT...")
             val pkgInstall = executor.executeShellCommand(
@@ -221,14 +186,12 @@ class BackupManager(private val executor: ProcessExecutor) {
         restoreDir.deleteRecursively()
         restoreDir.mkdirs()
 
-        // Ekstrak tanpa '&& echo OK || echo FAIL' yang rawan jebakan exit code 1 (warning) dari unzip
         val extract = executor.executeShellCommand(
             "unzip -o '${backup.absolutePath}' -d '${restoreDir.absolutePath}/'",
             lineCallback = lineCb,
             timeoutSeconds = 1800
         )
 
-        // Exit code 0 (OK) dan 1 (warning ringan) pada unzip dianggap berhasil jika file restore terisi
         val isExtractSuccess = (extract.exitCode == 0 || extract.exitCode == 1) && restoreDir.listFiles()?.isNotEmpty() == true
         if (!isExtractSuccess) {
             lastError = "Gagal ekstrak ZIP backup (exit ${extract.exitCode}): ${tailOf(extract)}. Cek apakah file '${backup.name}' corrupt."
@@ -236,7 +199,6 @@ class BackupManager(private val executor: ProcessExecutor) {
             return false
         }
 
-        // Sanity check
         val hasKnownContent = listOf("pkg-cache", "android-sdk", ".gradle", "wrapper-template")
             .any { File(restoreDir, it).exists() }
         if (!hasKnownContent) {
@@ -247,7 +209,6 @@ class BackupManager(private val executor: ProcessExecutor) {
             return false
         }
 
-        // Install .deb offline (jika ada di cache)
         val pkgCache = File(restoreDir, "pkg-cache")
         val debs = pkgCache.listFiles()?.filter { it.extension == "deb" }
         if (!debs.isNullOrEmpty()) {
@@ -262,7 +223,6 @@ class BackupManager(private val executor: ProcessExecutor) {
             }
         }
 
-        // Restore SDK, .gradle, wrapper-template
         val sdkBackup = File(restoreDir, "android-sdk")
         if (sdkBackup.exists()) {
             val r = executor.executeShellCommand(

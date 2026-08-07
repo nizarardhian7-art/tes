@@ -226,11 +226,9 @@ class ToolchainManager(
     private fun installSystemPackages(progress: (String) -> Unit, lineCb: ProcessExecutor.LineCallback?): Boolean {
         val env = mapOf("DEBIAN_FRONTEND" to "noninteractive")
 
-        // WAJIB: Pastikan folder partial untuk APT cache dibuat sebelum apt-get run!
         File("$sdkDir/pkg-cache/partial").mkdirs()
 
         progress("apt-get update...")
-        // Tanpa pipe '| tail -n 5' agar tidak pemicu SIGPIPE di bash pipefail
         val update = executor.executeShellCommand(
             "apt-get update -y",
             environment = env,
@@ -325,8 +323,10 @@ class ToolchainManager(
         tmpExtract.deleteRecursively()
         tmpExtract.mkdirs()
 
-        if (!executor.isExecutableAvailable("wget")) {
-            return fail("Tidak bisa download platform SDK: binary 'wget' tidak ditemukan. Pastikan apt-get install wget sukses.")
+        val hasWget = executor.isExecutableAvailable("wget")
+        val hasCurl = executor.isExecutableAvailable("curl")
+        if (!hasWget && !hasCurl) {
+            return fail("Tidak bisa download platform SDK: binary 'wget' atau 'curl' tidak ditemukan di PREFIX/bin.")
         }
 
         var downloaded = false
@@ -334,8 +334,13 @@ class ToolchainManager(
         for (revision in 1..4) {
             val url = "https://dl.google.com/android/repository/platform-${apiLevel}_r${revision.toString().padStart(2, '0')}.zip"
             progress("Mencoba download platform-$apiLevel r$revision...")
+            val cmd = if (hasWget) {
+                "wget -O '$tmpZip' '$url' && test -s '$tmpZip'"
+            } else {
+                "curl -fsSL -o '$tmpZip' '$url' && test -s '$tmpZip'"
+            }
             val download = executor.executeShellCommand(
-                "wget -O '$tmpZip' '$url' && test -s '$tmpZip'",
+                cmd,
                 lineCallback = lineCb,
                 timeoutSeconds = 600
             )
@@ -371,9 +376,13 @@ class ToolchainManager(
         Logger.logInfo(LOG_TAG, "Official download gagal, mencoba fallback AOSP platform...")
         progress("Official download gagal — fallback AOSP android.jar...")
         platformDir.mkdirs()
+        val fbCmd = if (hasWget) {
+            "wget -O '${File(platformDir, "android.jar").absolutePath}' 'https://github.com/Reginer/aosp-android-jar/raw/main/android-$apiLevel/android.jar'"
+        } else {
+            "curl -fsSL -o '${File(platformDir, "android.jar").absolutePath}' 'https://github.com/Reginer/aosp-android-jar/raw/main/android-$apiLevel/android.jar'"
+        }
         val fb = executor.executeShellCommand(
-            "wget -O '${File(platformDir, "android.jar").absolutePath}' " +
-                "'https://github.com/Reginer/aosp-android-jar/raw/main/android-$apiLevel/android.jar'",
+            fbCmd,
             lineCallback = lineCb,
             timeoutSeconds = 900
         )
