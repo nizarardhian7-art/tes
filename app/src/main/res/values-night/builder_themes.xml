@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- TermuxMod Builder — DayNight theme (night overrides: surface darker) -->
+    <style name="Theme.Builder.DayNight" parent="Theme.BaseActivity.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/builder_primary</item>
+        <item name="colorPrimaryVariant">@color/builder_primary_variant</item>
+        <item name="colorSecondary">@color/builder_secondary</item>
+        <item name="colorAccent">@color/builder_accent</item>
+        <item name="android:windowBackground">@color/builder_bg</item>
+
+        <item name="materialCardViewStyle">@style/Widget.Builder.Card</item>
+        <item name="toolbarStyle">@style/Widget.Builder.Toolbar</item>
+    </style>
+
+    <style name="Widget.Builder.Toolbar" parent="Widget.MaterialComponents.Toolbar.Primary">
+        <item name="android:background">@color/builder_surface_variant</item>
+        <item name="titleTextColor">@color/builder_on_surface</item>
+        <item name="navigationIconTint">@color/builder_on_surface</item>
+    </style>
+
+    <style name="Widget.Builder.Card" parent="Widget.MaterialComponents.CardView">
+        <item name="cardBackgroundColor">@color/builder_surface</item>
+        <item name="cardCornerRadius">12dp</item>
+        <item name="cardElevation">2dp</item>
+        <item name="contentPadding">16dp</item>
+    </style>
+</resources>

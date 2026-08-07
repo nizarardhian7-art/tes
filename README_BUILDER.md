@@ -253,3 +253,73 @@ grep kotlin-gradle-plugin build.gradle
 - Dengan `exported="false"`, activity hanya bisa dibuka dari dalam aplikasi
   (drawer, shortcut, atau `am start` dengan UID yang sama) — aman secara security.
 - `parentActivityName` membuat tombol back dari dashboard kembali ke terminal.
+---
+
+## Changelog — v4: UI Profesional + Import Backup + Setup Otomatis + Log Live + Cancel Fix
+
+### 1. Redesign UI BuilderMainActivity & BuildDashboardFragment (Material Design)
+- Tema baru `Theme.Builder.DayNight` (parent `Theme.BaseActivity.DayNight.NoActionBar`) dengan
+  palette khusus `builder_colors.xml` + `values-night/` (dark theme konsisten dgn Termux).
+- `activity_builder.xml`: `MaterialToolbar` + tombol back; `BuilderMainActivity` memakai
+  `AppCompatActivity` + `setContentView` + `supportFragmentManager`.
+- `fragment_build_dashboard.xml`: 3 `MaterialCardView` (Project + Mode, Status, Log),
+  `MaterialButtonToggleGroup` (Debug / Release / Clean), progress bar, panel log,
+  action bar 4 tombol (Import / Export / Batal / Build).
+- `BuildDashboardFragment`: scan project di background thread, spinner project,
+  LiveData observer, Snackbar untuk pesan sekali-kali, elapsed timer.
+
+### 2. Import Backup (SAF / Storage Access Framework)
+- Tombol **Import** → `ActivityResultContracts.OpenDocument` → user pilih file
+  `builder-backup-complete-*.zip` dari mana saja (termasuk backup hasil script lama).
+- File di-copy ke cache → `BackupManager.importEnvironmentBackupFromFile(file)`:
+  ekstrak → `dpkg -i` .deb offline → rsync `android-sdk`, `.gradle`, `wrapper-template`.
+- Notifikasi hasil via Snackbar (sukses/gagal).
+
+### 3. Auto-Setup Lengkap untuk user tanpa backup (fast debug)
+- `ToolchainManager.setupToolchain()` men-download SEMUA dependensi otomatis:
+  - APT: `openjdk-17`, `python`, `gradle`, `android-tools`, `rsync`, `aapt/aapt2/apksigner/d8/aidl`,
+    `cmake`, `ninja`, `make`, `wget/curl`, `git`, `zip/unzip`, `perl`, `p7zip`, `clang`.
+  - Platform SDK: coba `platform-<api>_r01..r04.zip` dari dl.google.com → fallback AOSP
+    `Reginer/aosp-android-jar` (android.jar) + `framework.aidl` builtin.
+  - NDK: `Lzhiyong/termux-ndk` r29 (r25c zip 404 — URL diperbaiki; fallback curl).
+  - Build-tools & CMake dummy (symlink PREFIX/bin + dummy execs/jars + dummy AIDL python).
+  - `gradle-wrapper.jar` template di-download bila gradle CLI tak tersedia; `gradlew`
+    minimal + `gradle-wrapper.properties` selalu ditulis.
+  - `termux-setup-storage`, `writeSdkLicense`, `~/.gradle/gradle.properties` global.
+- Semua download memakai `wget` dgn fallback `curl`, timeout panjang, dan progress live.
+
+### 4. Panel Log Real-time (terminal-like)
+- `ProcessExecutor` di-rewrite: **polling delta** `resultData.stdout/stderr` setiap 100 ms
+  (StreamGobbler menulis live), emit per-baris ke `LineCallback`.
+- `BuildOrchestrator.defaultLineCallback()` → progress `BUILDING` dengan `detail=line`
+  → `BuilderViewModel._logLine` → `BuildDashboardFragment.appendLogLine()`:
+  monospace, warna (error/warning/success/info), auto-scroll, tombol clear, batas 200 KB.
+- Setup/download/build semua memakai callback live — user selalu tahu apa yang sedang terjadi.
+
+### 5. Fix Tombol Batal (tidak macet)
+- Akar masalah: `AppShell.killIfExecuting` men-set state failed → `onAppShellExited`
+  TIDAK dipanggil → `CountDownLatch` tak pernah dihitung → thread hang → notifikasi macet.
+- Perbaikan: loop polling juga cek `isStateFailed()`/`hasExecuted()`/`cancelledFlag` →
+  keluar dari loop sendiri; `cancel()` membunuh SEMUA `activeAppShells`.
+- `BuildForegroundService`: `ACTION_CANCEL_BUILD` → `orchestrator.cancel()` →
+  update notifikasi final → `stopForeground(STOP_FOREGROUND_REMOVE)` + `cancel(NOTIFICATION_ID)`
+  + `releaseWakeLock()` + `stopSelf()`. Notifikasi dijamin hilang (try/catch di semua jalur).
+- `onDestroy` juga membatalkan orchestrator + melepas wake lock.
+
+### 6. Struktur File Baru
+| File | Fungsi |
+|------|--------|
+| `app/src/main/res/values/builder_colors.xml` | Palette warna light |
+| `app/src/main/res/values-night/builder_colors.xml` | Palette warna dark |
+| `app/src/main/res/values/builder_themes.xml` | Tema `Theme.Builder.DayNight` (light) |
+| `app/src/main/res/values-night/builder_themes.xml` | Tema night |
+| `app/src/main/res/drawable/ic_arrow_back.xml` | Ikon back toolbar |
+| `app/src/main/res/drawable/ic_clear_log.xml` | Ikon clear log |
+| `app/src/main/res/drawable/ic_stat_builder.xml` | Ikon notifikasi builder |
+
+### Verifikasi (tanpa `gradlew build`)
+- ✅ Semua file Kotlin di-compile dengan `kotlinc 2.2.20` (stub Android + termux-shared + Material):
+  `builder-core` 13 file → **exit 0**; `app/builder` 4 file → **exit 0**.
+- ✅ Semua XML resource (layout, values, values-night, drawable, xml, manifest) divalidasi → valid.
+- ✅ URL download diverifikasi live: platform-35/36 OK, platform-34 404 (fallback r02/AOSP),
+  NDK r25c 404 → diganti r29, gradle-wrapper.jar v8.13.0 OK.

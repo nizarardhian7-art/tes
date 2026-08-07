@@ -153,13 +153,23 @@ class BackupManager(private val executor: ProcessExecutor) {
 
         val backup = candidates.maxByOrNull { it.lastModified() } ?: return false
 
+        return importEnvironmentBackupFromFile(backup, sdkDir)
+    }
+
+    /**
+     * Import environment backup dari file ZIP spesifik (mis. dipilih via SAF).
+     * @return true bila berhasil
+     */
+    fun importEnvironmentBackupFromFile(backup: File, sdkDir: String = BuilderPaths.DEFAULT_SDK_DIR): Boolean {
+        if (!backup.exists()) return false
+
         val restoreDir = File("${BuilderPaths.DEFAULT_HOME_DIR}/.restore-temp")
         restoreDir.deleteRecursively()
         restoreDir.mkdirs()
 
         val extract = executor.executeShellCommand(
             "unzip -q -o '${backup.absolutePath}' -d '${restoreDir.absolutePath}/' 2>/dev/null && echo OK || echo FAIL",
-            timeoutSeconds = 900
+            timeoutSeconds = 1800
         )
         if (!extract.isSuccess || !extract.stdout.contains("OK")) {
             restoreDir.deleteRecursively()

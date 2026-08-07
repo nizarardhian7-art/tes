@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- TermuxMod Builder — Material Design palette (light) -->
+    <color name="builder_primary">#FF6D00</color>
+    <color name="builder_primary_dark">#C43E00</color>
+    <color name="builder_primary_variant">#FF6D00</color>
+    <color name="builder_secondary">#00BFA5</color>
+    <color name="builder_accent">#FF6D00</color>
+
+    <color name="builder_bg">#FAFAFA</color>
+    <color name="builder_surface">#FFFFFF</color>
+    <color name="builder_surface_variant">#F2F2F2</color>
+    <color name="builder_on_surface">#1A1A1A</color>
+    <color name="builder_on_surface_muted">#757575</color>
+
+    <color name="builder_log_bg">#121212</color>
+    <color name="builder_log_text">#E6E6E6</color>
+    <color name="builder_log_success">#4CAF50</color>
+    <color name="builder_log_error">#EF5350</color>
+    <color name="builder_log_warning">#FFB300</color>
+    <color name="builder_log_info">#64B5F6</color>
+
+    <color name="builder_status_running">#00BFA5</color>
+    <color name="builder_status_success">#2E7D32</color>
+    <color name="builder_status_error">#C62828</color>
+</resources>

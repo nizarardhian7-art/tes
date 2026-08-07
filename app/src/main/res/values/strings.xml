@@ -88,6 +88,33 @@
     <string name="action_open_file_browser">Files</string>
     <string name="action_open_apk_builder">APK Builder</string>
 
+    <!-- ===== TermuxMod Builder UI ===== -->
+    <string name="action_back">Back</string>
+    <string name="builder_project_label">Project (hasil scan /sdcard)</string>
+    <string name="builder_mode_label">Mode build</string>
+    <string name="builder_mode_debug">Debug</string>
+    <string name="builder_mode_release">Release</string>
+    <string name="builder_mode_clean">Clean</string>
+    <string name="builder_status_idle">IDLE</string>
+    <string name="builder_message_idle">Menunggu perintah build…</string>
+    <string name="builder_log_label">Log live</string>
+    <string name="builder_log_clear">Bersihkan log</string>
+    <string name="builder_import_backup">Import</string>
+    <string name="builder_export_backup">Export</string>
+    <string name="builder_cancel">Batal</string>
+    <string name="builder_start">Build</string>
+    <string name="builder_no_projects">Tidak ada project Android ditemukan di /sdcard. Salin project ke /sdcard lalu buka lagi, atau gunakan tombol Import untuk memulihkan environment.</string>
+    <string name="builder_scanning">Memindai project…</string>
+    <string name="builder_import_pick_title">Pilih file backup environment</string>
+    <string name="builder_import_running">Memulihkan environment dari backup…</string>
+    <string name="builder_import_success">Environment berhasil dipulihkan dari backup</string>
+    <string name="builder_import_failed">Gagal memulihkan backup. File mungkin korup atau bukan backup builder.</string>
+    <string name="builder_export_running">Membuat backup environment…</string>
+    <string name="builder_export_success">Backup environment dibuat: %1$s</string>
+    <string name="builder_export_failed">Gagal membuat backup environment. Jalankan setup toolchain dulu (build sekali).</string>
+    <string name="builder_cancel_toast">Membatalkan build…</string>
+    <string name="builder_start_empty">Pilih project dulu</string>
+
     <!-- TermuxMod: File Browser -->
     <string name="title_file_browser">Files</string>
     <string name="file_browser_up">Up</string>

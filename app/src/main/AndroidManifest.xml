@@ -109,7 +109,7 @@
             android:exported="false"
             android:label="@string/action_open_apk_builder"
             android:parentActivityName=".app.TermuxActivity"
-            android:theme="@style/Theme.TermuxApp.DayNight.DarkActionBar" />
+            android:theme="@style/Theme.Builder.DayNight" />
 
         <activity
             android:name=".app.filebrowser.FileBrowserActivity"

@@ -28,8 +28,14 @@ import java.util.concurrent.Executors
  * Foreground Service yang menjalankan BuildOrchestrator di background.
  *
  * - Memakai WAKE_LOCK agar device tidak tidur selama build (build.sh memakai termux-wake-lock)
- * - Notifikasi progress real-time
+ * - Notifikasi progress real-time + action Batal
  * - Aman terhadap rotation (build tetap jalan walau Activity di-destroy)
+ *
+ * v3 — perbaikan cancel:
+ *  - ACTION_CANCEL_BUILD: batalkan orchestrator, langsung update notif final,
+ *    lalu stopForeground + stopSelf + bersihkan wake lock (TIDAK macet).
+ *  - Notifikasi memakai ikon builder (ic_stat_builder) bukan ikon sistem.
+ *  - Setelah selesai/cancel: notifikasi dihapus (dismiss) setelah 2 detik.
  */
 class BuildForegroundService : Service() {
 
@@ -110,8 +116,25 @@ class BuildForegroundService : Service() {
                 }
             }
             ACTION_CANCEL_BUILD -> {
-                orchestrator?.cancel()
-                updateNotification(BuildProgress(BuildPhase.CANCELLED, "Membatalkan build...", 0))
+                // ★ Perbaikan cancel: batal orchestrator + langsung finalisasi
+                try {
+                    orchestrator?.cancel()
+                } catch (e: Exception) {
+                    // ignore
+                }
+                buildingFlag = false
+                val cancelled = BuildProgress(BuildPhase.CANCELLED, "Build dibatalkan", 0)
+                currentProgress = cancelled
+                lastResult = BuildResult(
+                    success = false,
+                    phase = BuildPhase.CANCELLED,
+                    message = "Build dibatalkan",
+                    elapsedSeconds = 0
+                )
+                // Kirim event final ke UI
+                mainHandler.post { listener?.invoke(cancelled) }
+                // Hapus notifikasi & hentikan service
+                dismissAndStop()
             }
             ACTION_STOP -> {
                 stopSelf()
@@ -139,25 +162,66 @@ class BuildForegroundService : Service() {
                 }
             }
 
-            val result = orchestrator!!.buildApk(config)
-            lastResult = result
-            buildingFlag = false
-            currentProgress = BuildProgress(
-                if (result.success) BuildPhase.SUCCESS else
-                    if (result.phase == BuildPhase.CANCELLED) BuildPhase.CANCELLED else BuildPhase.FAILED,
-                result.message,
-                if (result.success) 100 else 0
-            )
-            updateNotification(currentProgress)
-            mainHandler.post {
-                listener?.invoke(currentProgress)
-                listener = null
+            try {
+                val result = orchestrator!!.buildApk(config)
+                lastResult = result
+                buildingFlag = false
+                currentProgress = BuildProgress(
+                    if (result.success) BuildPhase.SUCCESS else
+                        if (result.phase == BuildPhase.CANCELLED) BuildPhase.CANCELLED else BuildPhase.FAILED,
+                    result.message,
+                    if (result.success) 100 else 0
+                )
+                updateNotification(currentProgress)
+                mainHandler.post {
+                    listener?.invoke(currentProgress)
+                }
+                // Selesai — hapus notifikasi & hentikan service setelah 2 detik
+                mainHandler.postDelayed({
+                    dismissAndStop()
+                }, 2000)
+            } catch (e: Exception) {
+                // ★ Jaga-jaga: error tak terduga — jangan biarkan notifikasi macet
+                lastResult = BuildResult(
+                    success = false,
+                    phase = BuildPhase.FAILED,
+                    message = "Build error: ${e.message}",
+                    elapsedSeconds = 0
+                )
+                buildingFlag = false
+                currentProgress = BuildProgress(BuildPhase.FAILED, "Build error: ${e.message}", 0)
+                updateNotification(currentProgress)
+                mainHandler.post {
+                    listener?.invoke(currentProgress)
+                }
+                mainHandler.postDelayed({
+                    dismissAndStop()
+                }, 2000)
             }
-            // Selesai — berhenti service setelah notifikasi final
-            mainHandler.postDelayed({
-                stopForeground(STOP_FOREGROUND_REMOVE)
-                stopSelf()
-            }, 3000)
+        }
+    }
+
+    /** Hapus notifikasi, lepas wake lock, hentikan service. */
+    private fun dismissAndStop() {
+        try {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            notificationManager?.cancel(NOTIFICATION_ID)
+        } catch (e: Exception) {
+            // ignore
+        }
+        releaseWakeLock()
+        stopSelf()
+    }
+
+    private fun releaseWakeLock() {
+        wakeLock?.let {
+            if (it.isHeld) {
+                try {
+                    it.release()
+                } catch (e: Exception) {
+                    // ignore
+                }
+            }
         }
     }
 
@@ -200,13 +264,15 @@ class BuildForegroundService : Service() {
             else -> "Idle"
         }
 
+        val done = progress.phase in listOf(BuildPhase.SUCCESS, BuildPhase.FAILED, BuildPhase.CANCELLED)
+
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("TermuxMod Builder")
             .setContentText(phaseLabel + (if (progress.message.isNotBlank()) "\n${progress.message.take(80)}" else ""))
-            .setSmallIcon(android.R.drawable.stat_sys_download)
+            .setSmallIcon(R.drawable.ic_stat_builder)
             .setContentIntent(openIntent)
-            .setOngoing(progress.phase !in listOf(BuildPhase.SUCCESS, BuildPhase.FAILED, BuildPhase.CANCELLED))
-            .setProgress(100, progress.percent, progress.percent == 0)
+            .setOngoing(!done)
+            .setProgress(100, progress.percent, progress.percent == 0 && !done)
             .addAction(0, "Batal", cancelIntent)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
@@ -222,9 +288,7 @@ class BuildForegroundService : Service() {
         super.onDestroy()
         orchestrator?.cancel()
         buildingFlag = false
-        wakeLock?.let {
-            if (it.isHeld) it.release()
-        }
+        releaseWakeLock()
         executorService.shutdownNow()
         listener = null
     }

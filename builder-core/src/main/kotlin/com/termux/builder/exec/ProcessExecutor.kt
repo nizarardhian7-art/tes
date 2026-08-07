@@ -19,8 +19,17 @@ import java.util.concurrent.atomic.AtomicBoolean
  * [AppShell.execute] dengan [TermuxShellEnvironment], sehingga environment Termux
  * (PREFIX, PATH, HOME, TMPDIR) ter-setup otomatis dan output ditangkap via StreamGobbler.
  *
- * Semua pemanggilan bersifat blocking (synchronous) dari thread worker, dengan dukungan
- * pembatalan (cancel) via sinyal SIGKILL ke process.
+ * **Streaming log real-time:** karena StreamGobbler menulis ke
+ * [ExecutionCommand.resultData].stdout/stderr selama proses berjalan, thread ini
+ * melakukan polling delta setiap 100 ms dan meneruskannya per-baris ke [LineCallback].
+ * UI dengan demikian melihat output (download progress, apt, gradle, dll) LIVE,
+ * bukan hanya saat proses selesai.
+ *
+ * **Pembatalan yang benar:** [killIfExecuting] men-set state failed pada
+ * ExecutionCommand sehingga `onAppShellExited` TIDAK dipanggil (lihat AppShell.run).
+ * Karena itu loop polling TIDAK boleh hanya mengandalkan CountDownLatch — ia juga
+ * memeriksa `isStateFailed()` / `hasExecuted()` agar tidak menggantung selamanya
+ * setelah [cancel].
  */
 class ProcessExecutor(private val context: Context) {
 
@@ -30,6 +39,9 @@ class ProcessExecutor(private val context: Context) {
         /** Batas buffer stdout/stderr agar tidak membengkak di memori (64 KB per stream). */
         private const val MAX_CAPTURE_LENGTH = 64 * 1024
 
+        /** Interval polling untuk streaming log real-time (ms). */
+        private const val POLL_INTERVAL_MS = 100L
+
         /** Environment tambahan yang selalu di-set (JVM toolchain). */
         val BASE_ENV: Map<String, String> = mapOf(
             "GRADLE_OPTS" to "-Xmx1280m -XX:MaxMetaspaceSize=384m -XX:+UseG1GC"
@@ -37,12 +49,11 @@ class ProcessExecutor(private val context: Context) {
     }
 
     private val cancelledFlag = AtomicBoolean(false)
-    private var activeAppShell: AppShell? = null
     private val activeAppShells = Collections.synchronizedSet(
         Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<AppShell, Boolean>())
     )
 
-    /** Interface callback untuk streaming output per baris. */
+    /** Interface callback untuk streaming output per baris (live). */
     interface LineCallback {
         fun onLine(line: String)
         fun onCancelled() {}
@@ -51,7 +62,6 @@ class ProcessExecutor(private val context: Context) {
     /** Batal semua eksekusi aktif (kirim SIGKILL ke process). */
     fun cancel() {
         cancelledFlag.set(true)
-        activeAppShell?.killIfExecuting(context, false)
         synchronized(activeAppShells) {
             activeAppShells.forEach { it.killIfExecuting(context, false) }
             activeAppShells.clear()
@@ -66,7 +76,7 @@ class ProcessExecutor(private val context: Context) {
     val isCancelled: Boolean get() = cancelledFlag.get()
 
     /**
-     * Jalankan perintah secara synchronous via AppShell.
+     * Jalankan perintah secara synchronous via AppShell (dengan streaming log live).
      *
      * @param executable path absolut executable (mis. /data/data/com.termux/files/usr/bin/bash)
      * @param arguments argumen (tanpa shell wrapper — AppShell menjalankan executable langsung)
@@ -99,33 +109,16 @@ class ProcessExecutor(private val context: Context) {
         extraEnv.putAll(BASE_ENV)
         extraEnv.putAll(environment)
 
-        val stdout = StringBuilder()
-        val stderr = StringBuilder()
         val done = CountDownLatch(1)
         val startTime = System.currentTimeMillis()
 
-        val client = object : AppShell.AppShellClient {
+        val client = object : AppShellClient {
             override fun onAppShellExited(appShell: AppShell) {
-                val ec = appShell.executionCommand
-                val data = ec.resultData
-                if (data.stdout.length > 0) stdout.append(data.stdout)
-                if (data.stderr.length > 0) stderr.append(data.stderr)
-                // Ekstrak baris live dari stdout/stderr
-                val merged = buildString {
-                    if (data.stdout.length > 0) append(data.stdout)
-                    if (data.stderr.length > 0) append(data.stderr)
-                }
-                if (merged.isNotBlank()) {
-                    merged.lines().forEach { line ->
-                        if (line.isNotBlank()) lineCallback?.onLine(line)
-                    }
-                }
                 done.countDown()
             }
         }
 
-        // Jalankan synchronous di thread ini (AppShell.execute dengan isSynchronous=false
-        // memulai thread sendiri; kita tunggu CountDownLatch agar bisa timeout & cancel).
+        // Jalankan asynchronous (AppShell memulai thread sendiri); kita polling.
         val appShell = AppShell.execute(
             context, executionCommand, client,
             TermuxShellEnvironment(), extraEnv, false
@@ -137,37 +130,111 @@ class ProcessExecutor(private val context: Context) {
             return CommandResult(-1, "", errMsg)
         }
 
-        activeAppShell = appShell
         activeAppShells.add(appShell)
 
+        val stdout = StringBuilder()
+        val stderr = StringBuilder()
+        var stdoutPos = 0
+        var stderrPos = 0
+        val partialLine = StringBuilder()
+
+        // Reader aman: substring delta dari StringBuilder hasil gobbler.
+        fun readDelta(builder: StringBuilder, fromPos: Int): Pair<String, Int> {
+            return try {
+                synchronized(builder) {
+                    val len = builder.length
+                    if (len > fromPos) {
+                        Pair(builder.substring(fromPos, len), len)
+                    } else {
+                        Pair("", len)
+                    }
+                }
+            } catch (e: Exception) {
+                // Race dengan resize StringBuilder — coba lagi siklus berikutnya
+                Pair("", fromPos)
+            }
+        }
+
+        // Emit teks delta sebagai baris-baris (pecah \n, buffer partial line).
+        fun emitDelta(text: String, toStderr: Boolean) {
+            if (text.isEmpty()) return
+            val merged = StringBuilder(partialLine)
+            merged.append(text)
+            val full = merged.toString()
+            val lines = full.split('\n')
+            partialLine.setLength(0)
+            for (i in 0 until lines.size - 1) {
+                val line = lines[i]
+                if (toStderr) stderr.append(line).append('\n') else stdout.append(line).append('\n')
+                if (line.isNotBlank()) lineCallback?.onLine(line)
+            }
+            val tail = lines.last()
+            if (tail.isNotEmpty()) partialLine.append(tail)
+        }
+
         try {
-            // Tunggu selesai (dengan timeout opsional)
-            val finished: Boolean = if (timeoutSeconds > 0) {
-                done.await(timeoutSeconds, TimeUnit.SECONDS)
-            } else {
-                // CountDownLatch.await() tanpa argumen mengembalikan void,
-                // jadi tunggu lalu anggap selesai.
-                done.await()
-                true
+            // ---- Loop polling: tunggu selesai / timeout / cancel, sambil stream log ----
+            val deadline = if (timeoutSeconds > 0) System.currentTimeMillis() + timeoutSeconds * 1000 else Long.MAX_VALUE
+            var finished = false
+            while (!finished) {
+                // 1) Streaming delta stdout & stderr
+                val (outDelta, outPos) = readDelta(executionCommand.resultData.stdout, stdoutPos)
+                stdoutPos = outPos
+                emitDelta(outDelta, toStderr = false)
+
+                val (errDelta, errPos) = readDelta(executionCommand.resultData.stderr, stderrPos)
+                stderrPos = errPos
+                emitDelta(errDelta, toStderr = true)
+
+                // 2) Cek kondisi selesai
+                if (done.await(POLL_INTERVAL_MS, TimeUnit.MILLISECONDS)) {
+                    finished = true
+                } else if (cancelledFlag.get() || executionCommand.isStateFailed() || executionCommand.hasExecuted()) {
+                    // killIfExecuting men-set state failed tanpa memanggil onAppShellExited,
+                    // jadi kita harus keluar dari loop sendiri.
+                    finished = true
+                } else if (System.currentTimeMillis() >= deadline) {
+                    finished = true
+                }
             }
 
-            if (!finished) {
-                // Timeout — batal
-                cancelledFlag.set(true)
+            // Flush sisa partial line
+            if (partialLine.isNotEmpty()) {
+                val line = partialLine.toString()
+                if (line.isNotBlank()) lineCallback?.onLine(line)
+                stdout.append(line).append('\n')
+                partialLine.setLength(0)
+            }
+
+            // Batasi buffer (jaga memori)
+            if (stdout.length > MAX_CAPTURE_LENGTH) stdout.delete(0, stdout.length - MAX_CAPTURE_LENGTH)
+            if (stderr.length > MAX_CAPTURE_LENGTH) stderr.delete(0, stderr.length - MAX_CAPTURE_LENGTH)
+
+            // ---- Tentukan hasil ----
+            if (cancelledFlag.get() || executionCommand.isStateFailed()) {
+                return CommandResult(
+                    -1, stdout.toString(), stderr.toString(),
+                    cancelled = cancelledFlag.get(),
+                    durationMs = System.currentTimeMillis() - startTime
+                )
+            }
+
+            if (System.currentTimeMillis() >= deadline && !executionCommand.hasExecuted()) {
+                // Timeout — batal paksa
                 appShell.killIfExecuting(context, false)
-                return CommandResult(-1, stdout.toString(), stderr.toString() + "\n[timeout after ${timeoutSeconds}s]",
-                    cancelled = true, durationMs = System.currentTimeMillis() - startTime)
-            }
-
-            if (cancelledFlag.get()) {
-                return CommandResult(-1, stdout.toString(), stderr.toString(), cancelled = true, durationMs = System.currentTimeMillis() - startTime)
+                return CommandResult(
+                    -1, stdout.toString(), stderr.toString() + "\n[timeout after ${timeoutSeconds}s]",
+                    cancelled = true, durationMs = System.currentTimeMillis() - startTime
+                )
             }
 
             val exitCode = executionCommand.resultData.exitCode ?: -1
-            return CommandResult(exitCode, stdout.toString(), stderr.toString(), durationMs = System.currentTimeMillis() - startTime)
+            return CommandResult(
+                exitCode, stdout.toString(), stderr.toString(),
+                durationMs = System.currentTimeMillis() - startTime
+            )
         } finally {
             activeAppShells.remove(appShell)
-            if (activeAppShell === appShell) activeAppShell = null
         }
     }
 

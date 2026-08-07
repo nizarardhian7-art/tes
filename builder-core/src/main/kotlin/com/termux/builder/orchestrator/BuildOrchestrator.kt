@@ -15,6 +15,7 @@ import com.termux.builder.scan.ProjectScanner
 import com.termux.builder.sync.WorkspaceSync
 import com.termux.builder.toolchain.HardwareDetector
 import com.termux.builder.toolchain.ToolchainManager
+import com.termux.shared.logger.Logger
 import java.io.File
 
 /**
@@ -56,6 +57,26 @@ class BuildOrchestrator(
     }
 
     /**
+     * Line callback default: kirim setiap baris output subprocess ke UI
+     * (progress BUILDING dengan detail = baris). Ini yang membuat log
+     * REAL-TIME tampil selama setup/download/build.
+     */
+    private fun defaultLineCallback(): ProcessExecutor.LineCallback {
+        return object : ProcessExecutor.LineCallback {
+            override fun onLine(line: String) {
+                if (line.isNotBlank()) {
+                    progressCallback(BuildProgress(
+                        BuildPhase.BUILDING,
+                        line.take(300),
+                        percent = 0,
+                        detail = line
+                    ))
+                }
+            }
+        }
+    }
+
+    /**
      * Jalankan build APK penuh.
      * @param config konfigurasi build (project path, mode)
      * @return BuildResult
@@ -93,7 +114,7 @@ class BuildOrchestrator(
             if (!toolchainManager.isSdkReady() || !toolchainManager.isNdkInstalled()) {
                 progressCallback(BuildProgress(BuildPhase.TOOLCHAIN_SETUP, "Toolchain belum siap, setup...", 5))
                 val setupOk = toolchainManager.setupToolchain(profile) { msg ->
-                    progressCallback(BuildProgress(BuildPhase.TOOLCHAIN_SETUP, msg, 5))
+                    progressCallback(BuildProgress(BuildPhase.TOOLCHAIN_SETUP, msg, 5, detail = msg))
                 }
                 if (!setupOk) {
                     return finish(BuildResult.failure(BuildPhase.TOOLCHAIN_SETUP, "Setup toolchain gagal"))
@@ -112,8 +133,10 @@ class BuildOrchestrator(
             }
 
             val compileSdk = patcher.detectCompileSdk(gradleFiles)
-            progressCallback(BuildProgress(BuildPhase.TOOLCHAIN_SETUP, "compileSdk=$compileSdk, memastikan platform...", 20))
-            toolchainManager.downloadPlatformSdk(compileSdk)
+            progressCallback(BuildProgress(BuildPhase.TOOLCHAIN_SETUP, "compileSdk=$compileSdk, memastikan platform...", 20, detail = "Memastikan platform android-$compileSdk tersedia..."))
+            toolchainManager.downloadPlatformSdk(compileSdk, progress = { msg ->
+                progressCallback(BuildProgress(BuildPhase.TOOLCHAIN_SETUP, msg, 20, detail = msg))
+            })
 
             // Build-tools & cmake dummy yang diminta project
             val btVer = patcher.detectBuildToolsVersion(gradleFiles)
@@ -124,9 +147,9 @@ class BuildOrchestrator(
             toolchainManager.setupDummyCmake("3.18.1")
 
             // Wrapper template
-            toolchainManager.ensureWrapperTemplate { msg ->
-                progressCallback(BuildProgress(BuildPhase.TOOLCHAIN_SETUP, msg, 22))
-            }
+            toolchainManager.ensureWrapperTemplate(progress = { msg ->
+                progressCallback(BuildProgress(BuildPhase.TOOLCHAIN_SETUP, msg, 22, detail = msg))
+            })
 
             // ---- 6. WRAPPER & GRADLE VERSION ----
             val wrapperProps = File(targetRoot, "gradle/wrapper/gradle-wrapper.properties")
@@ -141,6 +164,17 @@ class BuildOrchestrator(
                 if (!gradlew.exists()) {
                     val templateGradlew = File(BuilderPaths.DEFAULT_WRAPPER_DIR, "gradlew")
                     if (templateGradlew.exists()) templateGradlew.copyTo(gradlew, overwrite = true)
+                }
+            }
+
+            // Pastikan gradle-wrapper.jar ADA di project (sering hilang di source project)
+            val projectWrapperJar = File(targetRoot, "gradle/wrapper/gradle-wrapper.jar")
+            if (!projectWrapperJar.exists() || projectWrapperJar.length() < 10_000) {
+                val templateJar = File("${BuilderPaths.DEFAULT_WRAPPER_DIR}/gradle/wrapper/gradle-wrapper.jar")
+                if (templateJar.exists()) {
+                    File(targetRoot, "gradle/wrapper").mkdirs()
+                    templateJar.copyTo(projectWrapperJar, overwrite = true)
+                    Logger.logInfo(LOG_TAG, "gradle-wrapper.jar disalin dari template ke project")
                 }
             }
 
@@ -176,8 +210,7 @@ class BuildOrchestrator(
 
             // ---- 7. PATCH GRADLE FILES (dengan backup) ----
             progressCallback(BuildProgress(BuildPhase.PATCHING, "Patching Gradle files (sanitize Java 17, inject SDK/NDK)...", 30))
-            val installedNdkVersion = File(BuilderPaths.DEFAULT_SDK_DIR, "ndk")
-                .listFiles()?.firstOrNull { it.isDirectory }?.name ?: BuilderPaths.DEFAULT_NDK_VERSION
+            val installedNdkVersion = toolchainManager.installedNdkVersion() ?: BuilderPaths.DEFAULT_NDK_VERSION
 
             var patchedCount = 0
             for (file in gradleFiles) {
@@ -239,7 +272,7 @@ class BuildOrchestrator(
                 workingDirectory = targetRoot.absolutePath,
                 environment = mapOf(
                     "JAVA_HOME" to "${BuilderPaths.PREFIX_BIN_DIR}/../lib/jvm/java-17-openjdk",
-                    "PATH" to "${BuilderPaths.PREFIX_BIN_DIR}:${BuilderPaths.PREFIX_BIN_DIR}/../lib/jvm/java-17-openjdk/bin:\$PATH"
+                    "PATH" to "${BuilderPaths.PREFIX_BIN_DIR}:${BuilderPaths.PREFIX_BIN_DIR}/../lib/jvm/java-17-openjdk/bin:" + "\$PATH"
                 ),
                 lineCallback = object : ProcessExecutor.LineCallback {
                     override fun onLine(line: String) {
@@ -248,7 +281,8 @@ class BuildOrchestrator(
                         progressCallback(BuildProgress(
                             BuildPhase.BUILDING,
                             line.take(200),
-                            40 + (percent / 10).coerceIn(0, 40)
+                            40 + (percent / 10).coerceIn(0, 40),
+                            detail = line
                         ))
                     }
                 },
