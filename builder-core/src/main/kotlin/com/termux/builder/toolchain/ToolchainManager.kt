@@ -479,20 +479,33 @@ class ToolchainManager(
     }
 
     private fun installNdk(progress: (String) -> Unit, lineCb: ProcessExecutor.LineCallback?): Boolean {
-        val downloadUrl: String
-        val actualVersion: String
-        if (ndkVersion == BuilderPaths.DEFAULT_NDK_VERSION) {
-            downloadUrl = "https://github.com/Lzhiyong/termux-ndk/releases/download/android-ndk/android-ndk-r29-aarch64.7z"
-            actualVersion = "29.0.14206865"
-        } else {
-            downloadUrl = "https://github.com/Lzhiyong/termux-ndk/releases/download/android-ndk/android-ndk-r25c-aarch64.zip"
-            actualVersion = ndkVersion
-        }
+    val downloadUrl: String
+    val actualVersion: String
+    if (ndkVersion == BuilderPaths.DEFAULT_NDK_VERSION) {
+        downloadUrl = "https://github.com/Lzhiyong/termux-ndk/releases/download/android-ndk/android-ndk-r29-aarch64.7z"
+        actualVersion = "29.0.14206865"
+    } else {
+        downloadUrl = "https://github.com/Lzhiyong/termux-ndk/releases/download/android-ndk/android-ndk-r25c-aarch64.zip"
+        actualVersion = ndkVersion
+    }
 
-        val ndkZip = File("$sdkDir/ndk-download.7z")
-        val tmpDir = File("$sdkDir/ndk/tmp")
-        tmpDir.mkdirs()
+    // 1. CEK DULU: Apakah file arsip NDK sudah ada di lokal SDK dir (hasil dari Restore Backup)?
+    val localZips = listOf(
+        File("$sdkDir/ndk-download.7z"),
+        File("$sdkDir/android-ndk-r29-aarch64.7z"),
+        File("$sdkDir/android-ndk-r25c-aarch64.zip")
+    ) + (File(sdkDir).listFiles()?.filter { it.isFile && it.name.startsWith("android-ndk") && (it.extension == "7z" || it.extension == "zip") } ?: emptyList())
 
+    val existingZip = localZips.firstOrNull { it.exists() && it.length() > 10_000_000L } // Lebih dari 10MB
+    val ndkZip = existingZip ?: File("$sdkDir/ndk-download.7z")
+
+    val tmpDir = File("$sdkDir/ndk/tmp")
+    tmpDir.mkdirs()
+
+    // 2. JIKA FILE NDK SUDAH ADA DI LOKAL -> LEWATI DOWNLOAD!
+    if (existingZip != null) {
+        progress("File NDK terdeteksi di lokal (${existingZip.name}). Mengabaikan proses download...")
+    } else {
         progress("Mendownload NDK r29 (sekitar 400 MB, mohon tunggu)...")
         var dl = executor.executeShellCommand(
             "wget --show-progress -O '$ndkZip' '$downloadUrl'",
@@ -510,41 +523,43 @@ class ToolchainManager(
                 return fail("Download NDK gagal (wget & curl): ${tailOf(dl)}")
             }
         }
+    }
 
-        progress("Mengekstrak NDK (7z)...")
-        var ex = executor.executeShellCommand(
-            "unzip -o '$ndkZip' -d '$tmpDir'",
+    // 3. EKSTRAK FILE NDK LOKAL
+    progress("Mengekstrak NDK (${ndkZip.name})...")
+    var ex = executor.executeShellCommand(
+        "unzip -o '${ndkZip.absolutePath}' -d '${tmpDir.absolutePath}'",
+        lineCallback = lineCb,
+        timeoutSeconds = 900
+    )
+    if (!ex.isSuccess) {
+        ex = executor.executeShellCommand(
+            "7z x -y -o'${tmpDir.absolutePath}' '${ndkZip.absolutePath}'",
             lineCallback = lineCb,
             timeoutSeconds = 900
         )
-        if (!ex.isSuccess) {
-            ex = executor.executeShellCommand(
-                "7z x -y -o'$tmpDir' '$ndkZip'",
-                lineCallback = lineCb,
-                timeoutSeconds = 900
-            )
-        }
-        if (!ex.isSuccess) {
-            val reason = tailOf(ex)
-            ndkZip.deleteRecursively()
-            return fail("Gagal mengekstrak NDK (unzip/7z): $reason")
-        }
-
-        val extracted = findNdkRoot(tmpDir) ?: run {
-            ndkZip.deleteRecursively()
-            tmpDir.deleteRecursively()
-            fail("Folder NDK (ndk-build) tidak ditemukan di dalam arsip yang diekstrak.")
-            null
-        } ?: return false
-
-        File("$sdkDir/ndk").mkdirs()
-        val target = File("$sdkDir/ndk/$actualVersion")
-        if (target.exists()) target.deleteRecursively()
-        extracted.renameTo(target)
-        tmpDir.deleteRecursively()
-        ndkZip.deleteRecursively()
-        return true
     }
+    if (!ex.isSuccess) {
+        val reason = tailOf(ex)
+        ndkZip.deleteRecursively()
+        return fail("Gagal mengekstrak NDK (unzip/7z): $reason")
+    }
+
+    val extracted = findNdkRoot(tmpDir) ?: run {
+        ndkZip.deleteRecursively()
+        tmpDir.deleteRecursively()
+        fail("Folder NDK (ndk-build) tidak ditemukan di dalam arsip yang diekstrak.")
+        null
+    } ?: return false
+
+    File("$sdkDir/ndk").mkdirs()
+    val target = File("$sdkDir/ndk/$actualVersion")
+    if (target.exists()) target.deleteRecursively()
+    extracted.renameTo(target)
+    tmpDir.deleteRecursively()
+    ndkZip.deleteRecursively()
+    return true
+}
 
     private fun findNdkRoot(dir: File): File? {
         val stack = ArrayDeque<File>()
