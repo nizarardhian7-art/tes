@@ -10,8 +10,6 @@ import java.io.File
 /**
  * Patcher otomatis untuk file Gradle project (settings.gradle, build.gradle,
  * gradle.properties) agar kompatibel dengan lingkungan Android di Termux.
- *
- * Pemetaan presisi dari patch_gradle_files() di build.sh.
  */
 class GradleProjectPatcher(
     private val backupManager: BackupManager,
@@ -20,6 +18,23 @@ class GradleProjectPatcher(
 
     companion object {
         private const val LOG_TAG = "GradleProjectPatcher"
+
+        private val AGP_TO_GRADLE_MAP = mapOf(
+            "8.8" to "8.10.2",
+            "8.7" to "8.9",
+            "8.6" to "8.7",
+            "8.5" to "8.7",
+            "8.4" to "8.6",
+            "8.3" to "8.4",
+            "8.2" to "8.2",
+            "8.1" to "8.0",
+            "8.0" to "8.0",
+            "7.4" to "7.5",
+            "7.3" to "7.4",
+            "7.2" to "7.3.3",
+            "7.1" to "7.2",
+            "7.0" to "7.0.2"
+        )
     }
 
     /**
@@ -35,6 +50,87 @@ class GradleProjectPatcher(
         return true
     }
 
+    fun findGradleFiles(projectDir: File): List<File> {
+        val files = ArrayList<File>()
+        projectDir.walkTopDown()
+            .filter { it.isFile && (it.name == "build.gradle" || it.name == "build.gradle.kts") }
+            .forEach { files.add(it) }
+        return files
+    }
+
+    fun detectCompileSdk(files: List<File>): Int {
+        for (f in files) {
+            val text = f.readText()
+            val m1 = Regex("""compileSdk\s*=\s*(\d+)""").find(text)
+            if (m1 != null) return m1.groupValues[1].toInt()
+            val m2 = Regex("""compileSdkVersion\s+(\d+)""").find(text)
+            if (m2 != null) return m2.groupValues[1].toInt()
+        }
+        return 34
+    }
+
+    fun detectBuildToolsVersion(files: List<File>): String? {
+        for (f in files) {
+            val text = f.readText()
+            val m = Regex("""buildToolsVersion\s*=?\s*["']([^"']+)["']""").find(text)
+            if (m != null) return m.groupValues[1]
+        }
+        return null
+    }
+
+    fun detectAgpVersion(files: List<File>): String? {
+        for (f in files) {
+            val text = f.readText()
+            val m1 = Regex("""com\.android\.tools\.build:gradle:([\d\.\w\-]+)""").find(text)
+            if (m1 != null) return m1.groupValues[1]
+            val m2 = Regex("""id\(?["']com\.android\.application["']\)?\s+version\s+["']([^"']+)["']""").find(text)
+            if (m2 != null) return m2.groupValues[1]
+        }
+        return null
+    }
+
+    fun agpToGradle(agpVersion: String?): String {
+        if (agpVersion.isNullOrBlank()) return "8.13"
+        val majorMinor = agpVersion.split('.').take(2).joinToString(".")
+        return AGP_TO_GRADLE_MAP[majorMinor] ?: "8.13"
+    }
+
+    fun updateWrapperGradleVersion(projectDir: File, gradleVersion: String): Boolean {
+        val propsFile = File(projectDir, "gradle/wrapper/gradle-wrapper.properties")
+        if (!propsFile.exists()) return false
+
+        backupManager.backupFileForPatch(propsFile)
+        var text = propsFile.readText()
+        text = text.replace(
+            Regex("""distributionUrl=.*gradle-[\d\.\w\-]+-(bin|all)\.zip"""),
+            "distributionUrl=https\\://services.gradle.org/distributions/gradle-$gradleVersion-bin.zip"
+        )
+        propsFile.writeText(text)
+        return true
+    }
+
+    fun sanitizeJava17(projectDir: File): Boolean {
+        val files = findGradleFiles(projectDir)
+        for (f in files) {
+            backupManager.backupFileForPatch(f)
+            var text = f.readText()
+            text = text.replace(Regex("""JavaVersion\.VERSION_1_8"""), "JavaVersion.VERSION_17")
+            text = text.replace(Regex("""JavaVersion\.VERSION_11"""), "JavaVersion.VERSION_17")
+            text = text.replace(Regex("""sourceCompatibility\s*=\s*JavaVersion\.VERSION_\w+"""), "sourceCompatibility = JavaVersion.VERSION_17")
+            text = text.replace(Regex("""targetCompatibility\s*=\s*JavaVersion\.VERSION_\w+"""), "targetCompatibility = JavaVersion.VERSION_17")
+            f.writeText(text)
+        }
+        return true
+    }
+
+    fun injectSdkAndNdk(projectDir: File, sdkDir: String, ndkDir: String): Boolean {
+        val localProps = File(projectDir, "local.properties")
+        backupManager.backupFileForPatch(localProps)
+        val text = "sdk.dir=$sdkDir\nndk.dir=$ndkDir\n"
+        localProps.writeText(text)
+        return true
+    }
+
     /**
      * Patch settings.gradle / settings.gradle.kts.
      * Sama persis dengan build.sh: memastikan pluginManagement berisi repo google/mavenCentral/gradlePluginPortal.
@@ -47,7 +143,6 @@ class GradleProjectPatcher(
         backupManager.backupFileForPatch(settingsFile)
         var content = settingsFile.readText()
 
-        // Sama persis dengan build.sh: jika tidak ada google(), tambahkan pluginManagement
         if (!content.contains("google()")) {
             val repoBlock = """
                 pluginManagement {
@@ -70,10 +165,7 @@ class GradleProjectPatcher(
      * Menggunakan Regex presisi (TIDAK memotong 'val', 'var', atau kata kunci Kotlin DSL).
      */
     fun patchBuildGradle(projectDir: File, compileSdk: Int = 34, targetSdk: Int = 34): Boolean {
-        val gradleFiles = ArrayList<File>()
-        projectDir.walkTopDown()
-            .filter { it.isFile && (it.name == "build.gradle" || it.name == "build.gradle.kts") }
-            .forEach { gradleFiles.add(it) }
+        val gradleFiles = findGradleFiles(projectDir)
 
         for (f in gradleFiles) {
             backupManager.backupFileForPatch(f)
