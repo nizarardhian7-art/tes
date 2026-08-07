@@ -3,7 +3,10 @@ package com.termux.builder.toolchain
 import android.content.Context
 import android.util.Base64
 import com.termux.builder.exec.ProcessExecutor
+import com.termux.builder.log.BuildLog
 import com.termux.builder.model.BuilderPaths
+import com.termux.builder.model.CommandResult
+import com.termux.builder.model.DependencyCatalog
 import com.termux.builder.model.HardwareProfile
 import com.termux.shared.logger.Logger
 import java.io.File
@@ -11,6 +14,18 @@ import java.io.File
 /**
  * Manager toolchain Android SDK/NDK/Gradle — pemetaan Kotlin dari auto_setup()
  * pada build.sh.
+ *
+ * v2 — perombakan besar:
+ *  - SKIP-DOWNLOAD: semua komponen (platform SDK, NDK, build-tools, cmake,
+ *    gradle wrapper) DIVALIDASI dulu sebelum download. Jika sudah ada & valid,
+ *    langsung dipakai — TIDAK didownload ulang. Inilah perbaikan inti untuk
+ *    keluhan "import zip backup tapi tetap download ulang NDK/platform".
+ *  - URL platform SDK yang BENAR: versi lama memakai platform-34_r01..r04.zip
+ *    yang TIDAK ADA (404). Sekarang nama file di-resolve dari manifest
+ *    repository2-1.xml Google + tabel fallback yang sudah diverifikasi.
+ *  - Versi konsisten: NDK default 29.0.14206865 (r29 aarch64 Termux) —
+ *    sebelumnya tidak konsisten dengan DEFAULT_NDK_VERSION=25.2.9519653.
+ *  - Semua progress lewat [BuildLog] agar log terstruktur (section/step/ok/warn).
  */
 class ToolchainManager(
     private val context: Context,
@@ -29,10 +44,10 @@ class ToolchainManager(
             "make", "wget", "curl", "git", "zip", "unzip", "perl", "p7zip", "clang"
         )
 
-        /** Versi build-tools dummy yang disediakan. */
+        /** Versi build-tools yang disediakan (dummy + real bila ada). */
         val DUMMY_BUILD_TOOLS = listOf("33.0.1", "34.0.0")
 
-        /** Versi cmake dummy yang disediakan. */
+        /** Versi cmake yang disediakan. */
         val DUMMY_CMAKE = listOf("3.22.1", "3.18.1")
 
         /** Binary yang di-symlink dari PREFIX/bin ke build-tools. */
@@ -125,30 +140,84 @@ class ToolchainManager(
         return false
     }
 
-    private fun tailOf(result: com.termux.builder.model.CommandResult, maxLen: Int = 300): String {
+    private fun tailOf(result: CommandResult, maxLen: Int = 300): String {
         val text = result.stderr.ifBlank { result.stdout }.trim()
         val lastLines = text.lines().filter { it.isNotBlank() }.takeLast(3).joinToString(" | ")
         return lastLines.take(maxLen).ifBlank { "(exit ${result.exitCode}, tidak ada output)" }
     }
 
+    // ============================================================
+    // VALIDASI KOMPONEN (skip-download)
+    // ============================================================
+
+    /**
+     * SDK siap bila ada platform android dengan android.jar valid + license.
+     */
     fun isSdkReady(): Boolean {
         val platformsDir = File("$sdkDir/platforms")
         val hasPlatform = platformsDir.isDirectory &&
-            platformsDir.listFiles()?.any { it.isDirectory && File(it, "android.jar").exists() } == true
+            platformsDir.listFiles()?.any { it.isDirectory && File(it, "android.jar").exists() && File(it, "android.jar").length() > 1_000_000 } == true
         return hasPlatform && File("$sdkDir/licenses/android-sdk-license").exists()
     }
 
+    /**
+     * NDK terpasang bila ada direktori versi dengan ndk-build & toolchain valid.
+     * v2: tidak cukup cek ndk-build — toolchain prebuilt juga harus ada, agar
+     * AGP tidak mencoba download ulang di tengah build.
+     */
     fun isNdkInstalled(): Boolean {
         return installedNdkVersions().any { v ->
-            File("$sdkDir/ndk/$v/ndk-build").exists() || File("$sdkDir/ndk/$v/build/ndk-build").exists()
+            val ndkDirV = File("$sdkDir/ndk/$v")
+            val ndkBuild = File(ndkDirV, "ndk-build").exists() || File(ndkDirV, "build/ndk-build").exists()
+            val prebuilt = File(ndkDirV, "prebuilt").isDirectory
+            // Minimal ndk-build + source.properties (tanda NDK utuh)
+            ndkBuild && (prebuilt || File(ndkDirV, "source.properties").exists())
         }
     }
+
+    /** Versi NDK yang benar-benar terpasang, atau null. */
+    fun installedNdkVersions(): List<String> {
+        val ndkRoot = File("$sdkDir/ndk")
+        if (!ndkRoot.isDirectory) return emptyList()
+        return ndkRoot.listFiles()?.filter { it.isDirectory }?.map { it.name }?.sorted() ?: emptyList()
+    }
+
+    fun installedNdkVersion(): String? = installedNdkVersions().firstOrNull()
+
+    /**
+     * Cek apakah platform tertentu sudah terpasang & valid.
+     */
+    fun isPlatformInstalled(apiLevel: Int): Boolean {
+        val platformDir = File("$sdkDir/platforms/android-$apiLevel")
+        if (!platformDir.isDirectory) return false
+        val androidJar = File(platformDir, "android.jar")
+        return androidJar.exists() && androidJar.length() > 1_000_000
+    }
+
+    /**
+     * Cek apakah gradle distribution (zip) sudah ada di GRADLE_USER_HOME/wrapper/dists.
+     * v2: ini kunci "tidak download ulang gradle" — Gradle sendiri meletakkan
+     * zip di $HOME/.gradle/wrapper/dists/<name>/<hash>/<name>.zip. Jika zip
+     * sudah ada, wrapper memakainya tanpa unduh.
+     */
+    fun isGradleDistributionPresent(gradleVersion: String): Boolean {
+        val distsRoot = File(BuilderPaths.GRADLE_WRAPPER_DISTS)
+        if (!distsRoot.isDirectory) return false
+        return distsRoot.listFiles()?.any { dir ->
+            dir.isDirectory && dir.name.startsWith("gradle-$gradleVersion-") &&
+                dir.walkTopDown().any { it.isFile && it.name.endsWith(".zip") && it.length() > 1_000_000 }
+        } == true
+    }
+
+    // ============================================================
+    // SETUP UTAMA
+    // ============================================================
 
     fun setupToolchain(profile: HardwareProfile, progress: (String) -> Unit): Boolean {
         lastError = null
         val lineCb = object : ProcessExecutor.LineCallback {
             override fun onLine(line: String) {
-                if (line.isNotBlank()) progress(line.take(400))
+                if (line.isNotBlank()) progress(BuildLog.raw(line.take(400)))
             }
         }
 
@@ -163,10 +232,14 @@ class ToolchainManager(
             )
         }
 
-        progress("Memastikan akses storage...")
+        progress(BuildLog.section("SETUP TOOLCHAIN"))
+        progress(BuildLog.info("SDK dir : $sdkDir"))
+        progress(BuildLog.info("NDK versi: $ndkVersion"))
+
+        progress(BuildLog.step(1, 7, "Memastikan akses storage..."))
         ensureStorageAccess(lineCb)
 
-        progress("Menginstall paket sistem (APT)...")
+        progress(BuildLog.step(2, 7, "Menginstall paket sistem (APT)..."))
         if (!installSystemPackages(progress, lineCb)) {
             return false
         }
@@ -181,33 +254,41 @@ class ToolchainManager(
             )
         }
 
-        progress("Membangun direktori SDK & target dummy...")
+        progress(BuildLog.step(3, 7, "Membangun direktori SDK..."))
         createSdkLayout()
 
         DUMMY_BUILD_TOOLS.forEach { setupDummyBuildTools(it) }
         DUMMY_CMAKE.forEach { setupDummyCmake(it) }
 
-        progress("Mendownload platform SDK 34...")
-        if (!downloadPlatformSdk(34, progress, lineCb)) {
+        progress(BuildLog.step(4, 7, "Memastikan platform SDK (34)..."))
+        if (!ensurePlatformSdk(34, progress, lineCb)) {
             return false
         }
 
         writeSdkLicense()
         writeGlobalGradleProperties(profile)
 
+        progress(BuildLog.step(5, 7, "Memastikan Android NDK..."))
         if (!isNdkInstalled()) {
-            progress("Mendownload Android NDK (besar, mohon tunggu)...")
+            progress(BuildLog.warn("NDK belum terpasang, mendownload (sekali saja)..."))
             if (!installNdk(progress, lineCb)) {
                 return false
             }
         } else {
-            progress("NDK sudah terpasang.")
+            progress(BuildLog.ok("NDK sudah terpasang: ${installedNdkVersions().joinToString(", ")} — skip download."))
         }
 
+        progress(BuildLog.step(6, 7, "Memperbaiki permission NDK & wrapper template..."))
         fixNdkPermissions(progress, lineCb)
         ensureWrapperTemplate(progress, lineCb)
 
-        progress("Toolchain setup selesai.")
+        progress(BuildLog.step(7, 7, "Verifikasi akhir..."))
+        val sdkOk = isSdkReady()
+        val ndkOk = isNdkInstalled()
+        if (!sdkOk) progress(BuildLog.warn("SDK belum lengkap (platform android.jar belum ada) — build mungkin gagal."))
+        if (!ndkOk) progress(BuildLog.warn("NDK belum lengkap — build native akan gagal."))
+
+        progress(BuildLog.ok("Toolchain setup selesai (SDK=$sdkOk, NDK=$ndkOk)."))
         return true
     }
 
@@ -228,7 +309,7 @@ class ToolchainManager(
 
         File("$sdkDir/pkg-cache/partial").mkdirs()
 
-        progress("apt-get update...")
+        progress(BuildLog.info("apt-get update..."))
         val update = executor.executeShellCommand(
             "apt-get update -y",
             environment = env,
@@ -240,7 +321,7 @@ class ToolchainManager(
         }
 
         val pkgList = APT_PACKAGES.joinToString(" ")
-        progress("apt-get install $pkgList")
+        progress(BuildLog.info("apt-get install $pkgList"))
         val install = executor.executeShellCommand(
             "apt-get install -y --fix-missing -o Dir::Cache::archives=$sdkDir/pkg-cache $pkgList",
             environment = env,
@@ -273,7 +354,7 @@ class ToolchainManager(
     }
 
     private fun writeGlobalGradleProperties(profile: HardwareProfile) {
-        val gradleHome = File(BuilderPaths.DEFAULT_HOME_DIR, ".gradle")
+        val gradleHome = File(BuilderPaths.DEFAULT_GRADLE_HOME)
         gradleHome.mkdirs()
         File(gradleHome, "gradle.properties").writeText(gradlePropertiesTemplate(profile))
     }
@@ -300,21 +381,44 @@ class ToolchainManager(
         }
     }
 
+    // ============================================================
+    // PLATFORM SDK (dengan skip-download & URL benar)
+    // ============================================================
+
+    /**
+     * Pastikan platform SDK apiLevel terpasang.
+     * Jika sudah ada & valid -> SKIP download (ini perbaikan inti).
+     */
+    fun ensurePlatformSdk(apiLevel: Int, progress: (String) -> Unit = { _ -> }, lineCb: ProcessExecutor.LineCallback? = null): Boolean {
+        if (isPlatformInstalled(apiLevel)) {
+            progress(BuildLog.ok("Platform android-$apiLevel sudah terpasang — skip download."))
+            return true
+        }
+        progress(BuildLog.info("Platform android-$apiLevel belum lengkap, menyiapkan..."))
+        return downloadPlatformSdk(apiLevel, progress, lineCb)
+    }
+
+    /**
+     * Download platform SDK dari repositori resmi Google.
+     *
+     * v2 FIX (404): versi lama mencoba platform-34_r01..r04.zip yang TIDAK ADA.
+     * Nama file sekarang di-resolve dari manifest repository2-1.xml Google
+     * (paket `platforms;android-34` revision terbaru di channel 0) dengan
+     * fallback tabel [DependencyCatalog.PLATFORM_ZIP_FALLBACK] yang sudah
+     * diverifikasi (platform-34-ext7_r03.zip, dst).
+     */
     fun downloadPlatformSdk(apiLevel: Int, progress: (String) -> Unit = { _ -> }, lineCb: ProcessExecutor.LineCallback? = null): Boolean {
         val platformDir = File("$sdkDir/platforms/android-$apiLevel")
         val androidJar = File(platformDir, "android.jar")
 
+        // Hapus folder platform rusak/lama yang bukan milik level ini
         listOf("android-13", "android-14").forEach {
             File("$sdkDir/platforms/$it").deleteRecursively()
         }
 
-        if (androidJar.exists()) {
-            val coreJar = File(platformDir, "core-for-system-modules.jar")
-            if (coreJar.exists() && androidJar.length() != coreJar.length()) {
-                platformDir.deleteRecursively()
-            } else {
-                return true
-            }
+        if (androidJar.exists() && androidJar.length() > 1_000_000) {
+            progress(BuildLog.ok("Platform android-$apiLevel valid — skip download."))
+            return true
         }
 
         val tmpZip = File("$sdkDir/platform-$apiLevel.zip")
@@ -329,52 +433,59 @@ class ToolchainManager(
             return fail("Tidak bisa download platform SDK: binary 'wget' atau 'curl' tidak ditemukan di PREFIX/bin.")
         }
 
-        var downloaded = false
-        var lastDl: com.termux.builder.model.CommandResult? = null
-        for (revision in 1..4) {
-            val url = "https://dl.google.com/android/repository/platform-${apiLevel}_r${revision.toString().padStart(2, '0')}.zip"
-            progress("Mencoba download platform-$apiLevel r$revision...")
-            val cmd = if (hasWget) {
-                "wget -O '$tmpZip' '$url' && test -s '$tmpZip'"
-            } else {
-                "curl -fsSL -o '$tmpZip' '$url' && test -s '$tmpZip'"
+        // Resolve nama file zip dari manifest Google (nama resmi berbeda per level)
+        val zipFileName = resolvePlatformZipFileName(apiLevel, progress)
+            ?: run {
+                tmpExtract.deleteRecursively()
+                return fail("Tidak dapat menentukan nama file ZIP platform android-$apiLevel dari repository2-1.xml Google. Coba manual: letakkan platform di $platformDir dengan android.jar lengkap.")
             }
-            val download = executor.executeShellCommand(
-                cmd,
-                lineCallback = lineCb,
-                timeoutSeconds = 600
+        val url = DependencyCatalog.GOOGLE_REPO_BASE + zipFileName
+        progress(BuildLog.info("Download platform: $zipFileName"))
+
+        val cmd = if (hasWget) {
+            "wget -O '$tmpZip' '$url' && test -s '$tmpZip'"
+        } else {
+            "curl -fsSL -o '$tmpZip' '$url' && test -s '$tmpZip'"
+        }
+        val download = executor.executeShellCommand(
+            cmd,
+            lineCallback = lineCb,
+            timeoutSeconds = 900
+        )
+
+        if (!download.isSuccess || !tmpZip.exists() || tmpZip.length() < 10_000_000) {
+            tmpZip.deleteRecursively()
+            tmpExtract.deleteRecursively()
+            return fail(
+                "Download platform android-$apiLevel gagal ($url). " +
+                    "Alasan: ${tailOf(download)}. " +
+                    "Solusi offline: letakkan android.jar (lengkap, >10MB) di $platformDir."
             )
-            lastDl = download
-            if (download.isSuccess && tmpZip.exists() && tmpZip.length() > 0) {
-                downloaded = true
-                break
-            }
         }
 
-        if (downloaded) {
-            val extract = executor.executeShellCommand(
-                "unzip -o -q '$tmpZip' -d '$tmpExtract' 2>/dev/null",
-                lineCallback = lineCb,
-                timeoutSeconds = 300
-            )
-            if (extract.isSuccess) {
-                tmpZip.deleteRecursively()
-                val extracted = tmpExtract.listFiles()?.firstOrNull { it.isDirectory }
-                if (extracted != null && File(extracted, "android.jar").exists()) {
-                    platformDir.deleteRecursively()
-                    extracted.renameTo(platformDir)
-                    tmpExtract.deleteRecursively()
-                    writePlatformSourceProperties(platformDir, apiLevel)
-                    return true
-                }
+        val extract = executor.executeShellCommand(
+            "unzip -o -q '$tmpZip' -d '$tmpExtract' 2>/dev/null",
+            lineCallback = lineCb,
+            timeoutSeconds = 300
+        )
+        if (extract.isSuccess) {
+            tmpZip.deleteRecursively()
+            val extracted = tmpExtract.listFiles()?.firstOrNull { it.isDirectory }
+            if (extracted != null && File(extracted, "android.jar").exists() && File(extracted, "android.jar").length() > 1_000_000) {
+                platformDir.deleteRecursively()
+                extracted.renameTo(platformDir)
+                tmpExtract.deleteRecursively()
+                writePlatformSourceProperties(platformDir, apiLevel)
+                progress(BuildLog.ok("Platform android-$apiLevel terpasang."))
+                return true
             }
         }
 
         tmpExtract.deleteRecursively()
         tmpZip.deleteRecursively()
 
-        Logger.logInfo(LOG_TAG, "Official download gagal, mencoba fallback AOSP platform...")
-        progress("Official download gagal — fallback AOSP android.jar...")
+        // Fallback AOSP (hanya android.jar — tidak lengkap tapi bisa untuk compile)
+        progress(BuildLog.warn("Download resmi gagal — mencoba fallback AOSP android.jar..."))
         platformDir.mkdirs()
         val fbCmd = if (hasWget) {
             "wget -O '${File(platformDir, "android.jar").absolutePath}' 'https://github.com/Reginer/aosp-android-jar/raw/main/android-$apiLevel/android.jar'"
@@ -386,14 +497,54 @@ class ToolchainManager(
             lineCallback = lineCb,
             timeoutSeconds = 900
         )
-        if (fb.isSuccess && File(platformDir, "android.jar").length() > 0) {
+        if (fb.isSuccess && File(platformDir, "android.jar").length() > 1_000_000) {
             writePlatformSourceProperties(platformDir, apiLevel)
+            progress(BuildLog.ok("Fallback AOSP android.jar terpasang (android-$apiLevel)."))
             return true
         }
         return fail(
-            "Download platform SDK android-$apiLevel gagal total (official r01-r04 maupun fallback AOSP). " +
-                "Alasan official: ${lastDl?.let { tailOf(it) } ?: "-"}. Alasan fallback: ${tailOf(fb)}."
+            "Download platform SDK android-$apiLevel gagal total (resmi maupun fallback AOSP). " +
+                "Alasan resmi: ${tailOf(download)}. Alasan fallback: ${tailOf(fb)}. " +
+                "Masukkan platform android-$apiLevel lengkap ke backup zip (folder android-sdk/platforms/android-$apiLevel)."
         )
+    }
+
+    /**
+     * Resolve nama file ZIP platform dari manifest repository2-1.xml Google.
+     * Mengambil paket `platforms;android-<api>` revision terbaru channel 0
+     * dengan archive URL `platform-*.zip`.
+     *
+     * Karena XML besar (~1MB), dipakai `grep` via shell (lebih cepat daripada
+     * parse XML di Kotlin). Fallback ke tabel [DependencyCatalog.PLATFORM_ZIP_FALLBACK].
+     */
+    private fun resolvePlatformZipFileName(apiLevel: Int, progress: (String) -> Unit): String? {
+        // Fallback tabel (diverifikasi) — cepat & pasti
+        DependencyCatalog.PLATFORM_ZIP_FALLBACK[apiLevel]?.let {
+            return it
+        }
+
+        progress(BuildLog.info("Query repository2-1.xml Google untuk platform-$apiLevel..."))
+        val manifest = File("$sdkDir/repository2-1.xml")
+        val dl = executor.executeShellCommand(
+            "wget -q -O '$manifest' 'https://dl.google.com/android/repository/repository2-1.xml' || " +
+                "curl -fsSL -o '$manifest' 'https://dl.google.com/android/repository/repository2-1.xml' || true",
+            timeoutSeconds = 120
+        )
+        if (!dl.isSuccess || !manifest.exists() || manifest.length() < 100_000) {
+            return null
+        }
+
+        // Cari blok remotePackage path="platforms;android-XX" non-obsolete dengan url platform-XX*.zip
+        // Ambil yang TERAKHIR (revision tertinggi di akhir file)
+        val result = executor.executeShellCommand(
+            "awk '/<remotePackage path=\"platforms;android-$apiLevel\">/{f=1} f&&/<url>platform-[^<]+\\.zip<\\/url>/{u=\$0} f&&/<\\/remotePackage>/{if(u!=\"\"){print u; exit}}' '$manifest'",
+            timeoutSeconds = 30
+        )
+        if (result.isSuccess) {
+            val m = Regex("<url>([^<]+)</url>").find(result.stdout)
+            if (m != null) return m.groupValues[1]
+        }
+        return null
     }
 
     private fun writePlatformSourceProperties(platformDir: File, apiLevel: Int) {
@@ -405,8 +556,15 @@ class ToolchainManager(
         }
     }
 
+    // ============================================================
+    // BUILD-TOOLS & CMAKE (dummy + symlink, skip jika sudah ada)
+    // ============================================================
+
     fun setupDummyBuildTools(version: String) {
         val btDir = File("$sdkDir/build-tools/$version")
+        if (File(btDir, "source.properties").exists() && File(btDir, "aapt2").exists()) {
+            return // sudah disetup sebelumnya
+        }
         File(btDir, "lib").mkdirs()
         File(btDir, "renderscript/include").mkdirs()
         File(btDir, "renderscript/clang-include").mkdirs()
@@ -458,6 +616,9 @@ class ToolchainManager(
 
     fun setupDummyCmake(version: String) {
         val cmakeDir = File("$sdkDir/cmake/$version")
+        if (File(cmakeDir, "source.properties").exists() && File(cmakeDir, "bin/cmake").exists()) {
+            return // sudah disetup
+        }
         File(cmakeDir, "bin").mkdirs()
 
         if (!File("${BuilderPaths.PREFIX_BIN_DIR}/ninja").exists()) {
@@ -478,42 +639,39 @@ class ToolchainManager(
         )
     }
 
+    // ============================================================
+    // NDK (skip-download jika sudah ada)
+    // ============================================================
+
     private fun installNdk(progress: (String) -> Unit, lineCb: ProcessExecutor.LineCallback?): Boolean {
-    val downloadUrl: String
-    val actualVersion: String
-    if (ndkVersion == BuilderPaths.DEFAULT_NDK_VERSION) {
-        downloadUrl = "https://github.com/Lzhiyong/termux-ndk/releases/download/android-ndk/android-ndk-r29-aarch64.7z"
-        actualVersion = "29.0.14206865"
-    } else {
-        downloadUrl = "https://github.com/Lzhiyong/termux-ndk/releases/download/android-ndk/android-ndk-r25c-aarch64.zip"
-        actualVersion = ndkVersion
-    }
+        val downloadUrl: String
+        val actualVersion: String
+        if (ndkVersion == BuilderPaths.DEFAULT_NDK_VERSION) {
+            downloadUrl = DependencyCatalog.NDK_R29_URL
+            actualVersion = DependencyCatalog.NDK_R29_VERSION
+        } else {
+            downloadUrl = DependencyCatalog.NDK_R25C_URL
+            actualVersion = ndkVersion
+        }
 
-    // 1. CEK DULU: Apakah file arsip NDK sudah ada di lokal SDK dir (hasil dari Restore Backup)?
-    val localZips = listOf(
-        File("$sdkDir/ndk-download.7z"),
-        File("$sdkDir/android-ndk-r29-aarch64.7z"),
-        File("$sdkDir/android-ndk-r25c-aarch64.zip")
-    ) + (File(sdkDir).listFiles()?.filter { it.isFile && it.name.startsWith("android-ndk") && (it.extension == "7z" || it.extension == "zip") } ?: emptyList())
+        // Double-check: mungkin NDK sudah ada dari backup zip
+        if (isNdkInstalled()) {
+            progress(BuildLog.ok("NDK sudah terpasang (${installedNdkVersions().joinToString(", ")}) — skip download."))
+            return true
+        }
 
-    val existingZip = localZips.firstOrNull { it.exists() && it.length() > 10_000_000L } // Lebih dari 10MB
-    val ndkZip = existingZip ?: File("$sdkDir/ndk-download.7z")
+        val ndkZip = File("$sdkDir/ndk-download.7z")
+        val tmpDir = File("$sdkDir/ndk/tmp")
+        tmpDir.mkdirs()
 
-    val tmpDir = File("$sdkDir/ndk/tmp")
-    tmpDir.mkdirs()
-
-    // 2. JIKA FILE NDK SUDAH ADA DI LOKAL -> LEWATI DOWNLOAD!
-    if (existingZip != null) {
-        progress("File NDK terdeteksi di lokal (${existingZip.name}). Mengabaikan proses download...")
-    } else {
-        progress("Mendownload NDK r29 (sekitar 400 MB, mohon tunggu)...")
+        progress(BuildLog.info("Download NDK (sekitar 400 MB, sekali saja)..."))
         var dl = executor.executeShellCommand(
             "wget --show-progress -O '$ndkZip' '$downloadUrl'",
             lineCallback = lineCb,
             timeoutSeconds = 2400
         )
         if (!dl.isSuccess || !ndkZip.exists() || ndkZip.length() == 0L) {
-            progress("Gagal mendownload NDK (wget). Mencoba curl...")
+            progress(BuildLog.warn("Gagal mendownload NDK (wget). Mencoba curl..."))
             dl = executor.executeShellCommand(
                 "curl -fsSL --retry 2 -o '$ndkZip' '$downloadUrl'",
                 lineCallback = lineCb,
@@ -523,43 +681,42 @@ class ToolchainManager(
                 return fail("Download NDK gagal (wget & curl): ${tailOf(dl)}")
             }
         }
-    }
 
-    // 3. EKSTRAK FILE NDK LOKAL
-    progress("Mengekstrak NDK (${ndkZip.name})...")
-    var ex = executor.executeShellCommand(
-        "unzip -o '${ndkZip.absolutePath}' -d '${tmpDir.absolutePath}'",
-        lineCallback = lineCb,
-        timeoutSeconds = 900
-    )
-    if (!ex.isSuccess) {
-        ex = executor.executeShellCommand(
-            "7z x -y -o'${tmpDir.absolutePath}' '${ndkZip.absolutePath}'",
+        progress(BuildLog.info("Mengekstrak NDK..."))
+        var ex = executor.executeShellCommand(
+            "unzip -o '$ndkZip' -d '$tmpDir'",
             lineCallback = lineCb,
             timeoutSeconds = 900
         )
-    }
-    if (!ex.isSuccess) {
-        val reason = tailOf(ex)
-        ndkZip.deleteRecursively()
-        return fail("Gagal mengekstrak NDK (unzip/7z): $reason")
-    }
+        if (!ex.isSuccess) {
+            ex = executor.executeShellCommand(
+                "7z x -y -o'$tmpDir' '$ndkZip'",
+                lineCallback = lineCb,
+                timeoutSeconds = 900
+            )
+        }
+        if (!ex.isSuccess) {
+            val reason = tailOf(ex)
+            ndkZip.deleteRecursively()
+            return fail("Gagal mengekstrak NDK (unzip/7z): $reason")
+        }
 
-    val extracted = findNdkRoot(tmpDir) ?: run {
-        ndkZip.deleteRecursively()
+        val extracted = findNdkRoot(tmpDir) ?: run {
+            ndkZip.deleteRecursively()
+            tmpDir.deleteRecursively()
+            fail("Folder NDK (ndk-build) tidak ditemukan di dalam arsip yang diekstrak.")
+            null
+        } ?: return false
+
+        File("$sdkDir/ndk").mkdirs()
+        val target = File("$sdkDir/ndk/$actualVersion")
+        if (target.exists()) target.deleteRecursively()
+        extracted.renameTo(target)
         tmpDir.deleteRecursively()
-        fail("Folder NDK (ndk-build) tidak ditemukan di dalam arsip yang diekstrak.")
-        null
-    } ?: return false
-
-    File("$sdkDir/ndk").mkdirs()
-    val target = File("$sdkDir/ndk/$actualVersion")
-    if (target.exists()) target.deleteRecursively()
-    extracted.renameTo(target)
-    tmpDir.deleteRecursively()
-    ndkZip.deleteRecursively()
-    return true
-}
+        ndkZip.deleteRecursively()
+        progress(BuildLog.ok("NDK $actualVersion terpasang."))
+        return true
+    }
 
     private fun findNdkRoot(dir: File): File? {
         val stack = ArrayDeque<File>()
@@ -602,6 +759,10 @@ class ToolchainManager(
         )
     }
 
+    // ============================================================
+    // WRAPPER TEMPLATE (skip-download jika sudah ada)
+    // ============================================================
+
     fun ensureWrapperTemplate(progress: (String) -> Unit, lineCb: ProcessExecutor.LineCallback? = null) {
         val wrapperDir = File(BuilderPaths.DEFAULT_WRAPPER_DIR)
         val wrapperSub = File(wrapperDir, "gradle/wrapper")
@@ -609,13 +770,15 @@ class ToolchainManager(
 
         val jar = File(wrapperSub, "gradle-wrapper.jar")
         if (!jar.exists() || jar.length() < 10_000) {
-            progress("Mendownload gradle-wrapper.jar template...")
+            progress(BuildLog.info("Mendownload gradle-wrapper.jar template..."))
             executor.executeShellCommand(
                 "wget -q -O '${jar.absolutePath}' 'https://raw.githubusercontent.com/gradle/gradle/v8.13.0/gradle/wrapper/gradle-wrapper.jar' || " +
                     "curl -fsSL -o '${jar.absolutePath}' 'https://raw.githubusercontent.com/gradle/gradle/v8.13.0/gradle/wrapper/gradle-wrapper.jar' || true",
                 lineCallback = lineCb,
                 timeoutSeconds = 300
             )
+        } else {
+            progress(BuildLog.ok("gradle-wrapper.jar sudah ada — skip download."))
         }
 
         File(wrapperDir, "settings.gradle").writeText("rootProject.name='wrapper-template'\n")
@@ -630,7 +793,7 @@ class ToolchainManager(
         if (!props.exists()) {
             props.writeText(
                 "distributionBase=GRADLE_USER_HOME\ndistributionPath=wrapper/dists\n" +
-                    "distributionUrl=https\\://services.gradle.org/distributions/gradle-8.13-all.zip\n" +
+                    "distributionUrl=https\\://services.gradle.org/distributions/gradle-8.13-bin.zip\n" +
                     "networkTimeout=10000\nvalidateDistributionUrl=true\nzipStoreBase=GRADLE_USER_HOME\nzipStorePath=wrapper/dists\n"
             )
         }
@@ -643,12 +806,4 @@ class ToolchainManager(
             )
         }
     }
-
-    fun installedNdkVersions(): List<String> {
-        val ndkRoot = File("$sdkDir/ndk")
-        if (!ndkRoot.isDirectory) return emptyList()
-        return ndkRoot.listFiles()?.filter { it.isDirectory }?.map { it.name }?.sorted() ?: emptyList()
-    }
-
-    fun installedNdkVersion(): String? = installedNdkVersions().firstOrNull()
 }

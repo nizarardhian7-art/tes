@@ -3,6 +3,7 @@ package com.termux.builder.orchestrator
 import android.content.Context
 import com.termux.builder.backup.BackupManager
 import com.termux.builder.exec.ProcessExecutor
+import com.termux.builder.log.BuildLog
 import com.termux.builder.log.LogStreamParser
 import com.termux.builder.model.BuildConfig
 import com.termux.builder.model.BuildPhase
@@ -58,8 +59,7 @@ class BuildOrchestrator(
 
     /**
      * Line callback default: kirim setiap baris output subprocess ke UI
-     * (progress BUILDING dengan detail = baris). Ini yang membuat log
-     * REAL-TIME tampil selama setup/download/build.
+     * (progress BUILDING dengan detail = baris).
      */
     private fun defaultLineCallback(): ProcessExecutor.LineCallback {
         return object : ProcessExecutor.LineCallback {
@@ -74,6 +74,14 @@ class BuildOrchestrator(
                 }
             }
         }
+    }
+
+    /**
+     * Kirim pesan log terstruktur ke UI dengan phase tertentu.
+     * Semua pesan lewat [BuildLog] agar konsisten (section/step/ok/warn/error).
+     */
+    private fun log(phase: BuildPhase, msg: String, percent: Int) {
+        progressCallback(BuildProgress(phase, msg.take(300), percent, detail = msg))
     }
 
     /**
@@ -97,7 +105,8 @@ class BuildOrchestrator(
             }
 
             // ---- 1. SCANNING ----
-            progressCallback(BuildProgress(BuildPhase.SCANNING, "Scanning project...", 2))
+            log(BuildPhase.SCANNING, BuildLog.section("MEMULAI BUILD — ${File(config.projectPath).name} (${config.mode.buildType.gradleTask})"), 2)
+            log(BuildPhase.SCANNING, BuildLog.step(1, 8, "Scanning project..."), 2)
             val scanResult = projectScanner.scan(config.projectPath)
             val project = scanResult.androidProjects.firstOrNull { it.path == config.projectPath }
                 ?: scanResult.androidProjects.firstOrNull { it.path == File(config.projectPath).absolutePath }
@@ -105,16 +114,22 @@ class BuildOrchestrator(
             if (project == null) {
                 return finish(BuildResult.failure(BuildPhase.FAILED, "Tidak ada project Android valid di ${config.projectPath}"))
             }
+            log(BuildPhase.SCANNING, BuildLog.ok("Project: ${project.name}"), 2)
 
             // ---- 2. HARDWARE PROFILE ----
             val profile = hardwareDetector.detect()
-            progressCallback(BuildProgress(BuildPhase.TOOLCHAIN_SETUP, "Hardware: ${profile.profileName} (${profile.ramMb} MB)", 3))
+            log(BuildPhase.TOOLCHAIN_SETUP, BuildLog.step(2, 8, "Hardware: ${profile.profileName} (${profile.ramMb} MB)"), 3)
 
-            // ---- 3. TOOLCHAIN SETUP ----
-            if (!toolchainManager.isSdkReady() || !toolchainManager.isNdkInstalled()) {
-                progressCallback(BuildProgress(BuildPhase.TOOLCHAIN_SETUP, "Toolchain belum siap, setup...", 5))
+            // ---- 3. TOOLCHAIN SETUP (skip jika sudah lengkap) ----
+            log(BuildPhase.TOOLCHAIN_SETUP, BuildLog.step(3, 8, "Memeriksa toolchain..."), 4)
+            val sdkReady = toolchainManager.isSdkReady()
+            val ndkReady = toolchainManager.isNdkInstalled()
+            if (sdkReady && ndkReady) {
+                log(BuildPhase.TOOLCHAIN_SETUP, BuildLog.ok("SDK & NDK sudah siap — skip setup toolchain."), 10)
+            } else {
+                log(BuildPhase.TOOLCHAIN_SETUP, BuildLog.warn("Toolchain belum lengkap (SDK=$sdkReady, NDK=$ndkReady), setup..."), 5)
                 val setupOk = toolchainManager.setupToolchain(profile) { msg ->
-                    progressCallback(BuildProgress(BuildPhase.TOOLCHAIN_SETUP, msg, 5, detail = msg))
+                    log(BuildPhase.TOOLCHAIN_SETUP, msg, 8)
                 }
                 if (!setupOk) {
                     val reason = toolchainManager.lastError ?: "Setup toolchain gagal (alasan tidak diketahui — lihat log di atas)"
@@ -123,7 +138,7 @@ class BuildOrchestrator(
             }
 
             // ---- 4. SYNC WORKSPACE ----
-            progressCallback(BuildProgress(BuildPhase.SYNCING, "Synchronizing workspace (precision sync)...", 15))
+            log(BuildPhase.SYNCING, BuildLog.step(4, 8, "Synchronizing workspace (precision sync)..."), 15)
             val workspaceDir = workspaceSync.sync(config.projectPath, nativeMode = false, clean = config.mode.isClean)
             val targetRoot = File(workspaceDir)
 
@@ -134,10 +149,15 @@ class BuildOrchestrator(
             }
 
             val compileSdk = patcher.detectCompileSdk(gradleFiles)
-            progressCallback(BuildProgress(BuildPhase.TOOLCHAIN_SETUP, "compileSdk=$compileSdk, memastikan platform...", 20, detail = "Memastikan platform android-$compileSdk tersedia..."))
-            toolchainManager.downloadPlatformSdk(compileSdk, progress = { msg ->
-                progressCallback(BuildProgress(BuildPhase.TOOLCHAIN_SETUP, msg, 20, detail = msg))
+            log(BuildPhase.TOOLCHAIN_SETUP, BuildLog.step(5, 8, "Memastikan platform android-$compileSdk..."), 20)
+            // v2: hasil ensurePlatformSdk DIPERIKSA — versi lama mengabaikan return value
+            val platformOk = toolchainManager.ensurePlatformSdk(compileSdk, progress = { msg ->
+                log(BuildPhase.TOOLCHAIN_SETUP, msg, 20)
             })
+            if (!platformOk) {
+                val reason = toolchainManager.lastError ?: "Platform android-$compileSdk tidak tersedia"
+                return finish(BuildResult.failure(BuildPhase.TOOLCHAIN_SETUP, reason))
+            }
 
             // Build-tools & cmake dummy yang diminta project
             val btVer = patcher.detectBuildToolsVersion(gradleFiles)
@@ -149,10 +169,11 @@ class BuildOrchestrator(
 
             // Wrapper template
             toolchainManager.ensureWrapperTemplate(progress = { msg ->
-                progressCallback(BuildProgress(BuildPhase.TOOLCHAIN_SETUP, msg, 22, detail = msg))
+                log(BuildPhase.TOOLCHAIN_SETUP, msg, 22)
             })
 
             // ---- 6. WRAPPER & GRADLE VERSION ----
+            log(BuildPhase.TOOLCHAIN_SETUP, BuildLog.step(6, 8, "Menyiapkan Gradle wrapper..."), 24)
             val wrapperProps = File(targetRoot, "gradle/wrapper/gradle-wrapper.properties")
             val gradlew = File(targetRoot, "gradlew")
             if (!wrapperProps.exists()) {
@@ -185,6 +206,7 @@ class BuildOrchestrator(
                 ?: gradleFiles.firstOrNull()
             val agpVersion = rootGradle?.let { patcher.detectAgpVersion(it) }
             val gradleVersion = patcher.agpToGradle(agpVersion)
+            log(BuildPhase.TOOLCHAIN_SETUP, BuildLog.info("AGP=${agpVersion ?: "?"} -> Gradle $gradleVersion"), 24)
 
             if (wrapperProps.exists()) {
                 val propsContent = wrapperProps.readText()
@@ -194,6 +216,12 @@ class BuildOrchestrator(
                 if (wrapperProps.readText().contains("\r")) {
                     wrapperProps.writeText(wrapperProps.readText().replace("\r", ""))
                 }
+            }
+
+            // v2: cek apakah gradle distribution sudah ada di GRADLE_USER_HOME
+            // (dari backup) — kalau ya, beri tahu user bahwa tidak akan diunduh ulang
+            if (toolchainManager.isGradleDistributionPresent(gradleVersion)) {
+                log(BuildPhase.TOOLCHAIN_SETUP, BuildLog.ok("Gradle $gradleVersion sudah ada di cache — tidak diunduh ulang."), 25)
             }
 
             // Fix gradlew (CRLF + DEFAULT_JVM_OPTS)
@@ -210,20 +238,29 @@ class BuildOrchestrator(
             }
 
             // ---- 7. PATCH GRADLE FILES (dengan backup) ----
-            progressCallback(BuildProgress(BuildPhase.PATCHING, "Patching Gradle files (sanitize Java 17, inject SDK/NDK)...", 30))
+            log(BuildPhase.PATCHING, BuildLog.step(7, 8, "Patching Gradle files (sanitize Java 17, inject SDK/NDK)..."), 30)
             val installedNdkVersion = toolchainManager.installedNdkVersion() ?: BuilderPaths.DEFAULT_NDK_VERSION
 
             var patchedCount = 0
+            var skippedCount = 0
             for (file in gradleFiles) {
                 if (executor.isCancelled) break
+                // v2: gradle.properties hanya untuk deteksi versi — jangan di-patch
+                // (sanitize/inject bisa merusak property file yang bukan build script)
+                if (file.name == "gradle.properties") continue
                 backupManager.backupFileForPatch(file)
                 var content = file.readText()
+                val original = content
                 content = patcher.sanitizeJava17(content)
                 content = patcher.injectSdkAndNdk(content, file.name.endsWith(".kts"), compileSdk, installedNdkVersion)
-                file.writeText(content)
-                patchedCount++
+                if (content != original) {
+                    file.writeText(content)
+                    patchedCount++
+                } else {
+                    skippedCount++
+                }
             }
-            progressCallback(BuildProgress(BuildPhase.PATCHING, "Patched $patchedCount file Gradle", 35))
+            log(BuildPhase.PATCHING, BuildLog.ok("Patched $patchedCount file Gradle (${skippedCount} tidak berubah)"), 35)
 
             // ---- 8. local.properties + gradle.properties (append) ----
             val cmakeVersion = "3.22.1"
@@ -254,7 +291,8 @@ class BuildOrchestrator(
             }
 
             // ---- 9. BUILD ----
-            progressCallback(BuildProgress(BuildPhase.BUILDING, "Menjalankan ./gradlew ${config.mode.buildType.gradleTask}...", 40))
+            log(BuildPhase.BUILDING, BuildLog.step(8, 8, "Menjalankan ./gradlew ${config.mode.buildType.gradleTask}..."), 40)
+            log(BuildPhase.BUILDING, BuildLog.info("Ini bisa memakan waktu 5-30 menit (atau lebih lama di device lama)."), 40)
             val gradleFlags = buildString {
                 append("-Dorg.gradle.native=false ")
                 append("-Dorg.gradle.java.installations.auto-detect=false ")
@@ -277,13 +315,16 @@ class BuildOrchestrator(
                 ),
                 lineCallback = object : ProcessExecutor.LineCallback {
                     override fun onLine(line: String) {
-                        val parsed = logParser.processLine(line)
+                        // v2: bersihkan \r dari progress bar gradle agar log tidak naik-turun
+                        val clean = logParser.cleanLine(line)
+                        if (clean.isBlank()) return
+                        val parsed = logParser.processLine(clean)
                         val percent = logParser.getLastProgressPercent()
                         progressCallback(BuildProgress(
                             BuildPhase.BUILDING,
-                            line.take(200),
-                            40 + (percent / 10).coerceIn(0, 40),
-                            detail = line
+                            clean.take(200),
+                            40 + (percent / 10).coerceIn(0, 50),
+                            detail = BuildLog.raw(clean)
                         ))
                     }
                 },
@@ -298,7 +339,7 @@ class BuildOrchestrator(
 
             // ---- 10. COPY APK ----
             if (buildResult.isSuccess) {
-                progressCallback(BuildProgress(BuildPhase.COPYING, "Mencari & menyalin APK...", 92))
+                log(BuildPhase.COPYING, BuildLog.step(9, 9, "Mencari & menyalin APK..."), 92)
                 val apkFile = findApk(targetRoot)
                 if (apkFile == null) {
                     val summary = logParser.buildErrorSummary()
@@ -324,13 +365,20 @@ class BuildOrchestrator(
                 }
 
                 val elapsed = (System.currentTimeMillis() - startTime) / 1000
-                progressCallback(BuildProgress(BuildPhase.SUCCESS, "Build sukses: ${outApk.name}", 100))
+                log(BuildPhase.SUCCESS, BuildLog.section("BUILD SUKSES"), 100)
+                log(BuildPhase.SUCCESS, BuildLog.ok("APK: ${outApk.absolutePath} (${formatSize(outApk.length())})"), 100)
+                log(BuildPhase.SUCCESS, BuildLog.info("Waktu total: ${BuildLog.duration(elapsed)}"), 100)
                 return finish(BuildResult.success(outApk.absolutePath, elapsed,
                     "APK: ${outApk.absolutePath} (${formatSize(outApk.length())})"))
             }
 
             // ---- FAILED ----
             val summary = logParser.buildErrorSummary()
+            log(BuildPhase.FAILED, BuildLog.section("BUILD GAGAL"), 0)
+            log(BuildPhase.FAILED, BuildLog.error("Exit code ${buildResult.exitCode}. Ringkasan error:"), 0)
+            summary.lines.take(15).forEach { line ->
+                log(BuildPhase.FAILED, BuildLog.error(line.take(300)), 1)
+            }
             return finish(BuildResult.failure(BuildPhase.FAILED,
                 "Build gagal (exit ${buildResult.exitCode})",
                 summary = summary.lines.joinToString("\n").ifBlank { buildResult.stderr.take(500) },

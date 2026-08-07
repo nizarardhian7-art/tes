@@ -202,7 +202,12 @@ class ProcessExecutor(private val context: Context) {
         }
     }
 
-    /** Jalankan command via shell (bash -c). */
+    /**
+     * Jalankan command via shell (bash -c).
+     * v2: tambah `export PATH` default Termux bila environment tidak mensetnya,
+     * dan jangan pakai `set -o pipefail` pada command yang sengaja `|| true`
+     * (pipefail mengubah exit code command yang sudah di-guard).
+     */
     fun executeShellCommand(
         command: String,
         workingDirectory: String? = null,
@@ -211,30 +216,50 @@ class ProcessExecutor(private val context: Context) {
         timeoutSeconds: Long = 0
     ): CommandResult {
         val bashPath = TermuxShellUtils.getShellExecutablePath() ?: "/data/data/com.termux/files/usr/bin/bash"
-        val safeCommand = "set -o pipefail; $command"
+        // Jangan override PATH bila caller sudah mensetnya (mis. build gradle)
+        val safeEnv = if (environment.containsKey("PATH")) {
+            environment
+        } else {
+            val defaultPath = "${BuilderPaths.PREFIX_BIN_DIR}:/data/data/com.termux/files/usr/bin:/usr/bin:/bin"
+            environment + ("PATH" to defaultPath)
+        }
+        val safeCommand = command.trimStart()
         return execute(
             bashPath,
             arrayOf("-c", safeCommand),
             workingDirectory,
-            environment = environment,
+            environment = safeEnv,
             lineCallback = lineCallback,
             timeoutSeconds = timeoutSeconds
         )
     }
 
-    /** 
+    /**
      * Cek keberadaan executable langsung ke filesystem Android (bebas bug subshell hash).
+     * v2 FIX: cache hasil pengecekan agar tidak menjalankan shell berkali-kali
+     * (versi lama memanggil `command -v` untuk tiap binary tiap kali -> lambat
+     * dan memicu "download ulang" karena isExecutableAvailable kadang false-negative
+     * saat PATH belum di-export).
      */
-    fun isExecutableAvailable(binary: String): Boolean {
-        if (binary.startsWith("/")) {
-            val f = File(binary)
-            return f.exists()
-        }
-        val prefixFile = File(BuilderPaths.PREFIX_BIN_DIR, binary)
-        if (prefixFile.exists()) return true
+    private val executableCache = HashMap<String, Boolean>()
 
-        val result = executeShellCommand("command -v $binary 2>/dev/null")
-        return result.isSuccess && result.stdout.trim().isNotBlank()
+    fun isExecutableAvailable(binary: String): Boolean {
+        executableCache[binary]?.let { return it }
+
+        val result = if (binary.startsWith("/")) {
+            val f = File(binary)
+            f.exists() && (f.canExecute() || f.isDirectory)
+        } else {
+            val prefixFile = File(BuilderPaths.PREFIX_BIN_DIR, binary)
+            if (prefixFile.exists()) {
+                true
+            } else {
+                val r = executeShellCommand("command -v $binary 2>/dev/null")
+                r.isSuccess && r.stdout.trim().isNotBlank()
+            }
+        }
+        executableCache[binary] = result
+        return result
     }
 
     /** Cek daftar binary sekaligus, kembalikan yang HILANG saja. */

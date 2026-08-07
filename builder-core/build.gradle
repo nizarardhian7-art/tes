@@ -9,12 +9,12 @@ plugins {
 android {
     namespace "com.termux.builder"
 
-    compileSdkVersion project.properties.compileSdkVersion.toInteger()
-    ndkVersion = System.getenv("JITPACK_NDK_VERSION") ?: project.properties.ndkVersion
+    compileSdkVersion (project.findProperty("compileSdkVersion") ?: 36).toString().toInteger()
+    ndkVersion = System.getenv("JITPACK_NDK_VERSION") ?: (project.findProperty("ndkVersion") ?: "29.0.14206865")
 
     defaultConfig {
-        minSdkVersion project.properties.minSdkVersion.toInteger()
-        targetSdkVersion project.properties.targetSdkVersion.toInteger()
+        minSdkVersion (project.findProperty("minSdkVersion") ?: 21).toString().toInteger()
+        targetSdkVersion (project.findProperty("targetSdkVersion") ?: 28).toString().toInteger()
         consumerProguardFiles "consumer-rules.pro"
     }
 

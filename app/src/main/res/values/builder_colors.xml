@@ -19,6 +19,8 @@
     <color name="builder_log_error">#EF5350</color>
     <color name="builder_log_warning">#FFB300</color>
     <color name="builder_log_info">#64B5F6</color>
+    <color name="builder_log_section">#FF8A3D</color>
+    <color name="builder_log_step">#82B1FF</color>
 
     <color name="builder_status_running">#00BFA5</color>
     <color name="builder_status_success">#2E7D32</color>

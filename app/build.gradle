@@ -11,15 +11,16 @@ ext {
 android {
     namespace "com.termux"
 
-    compileSdkVersion project.properties.compileSdkVersion.toInteger()
-    ndkVersion = System.getenv("JITPACK_NDK_VERSION") ?: project.properties.ndkVersion
+    // v2: gunakan findProperty agar tidak NPE bila key hilang dari gradle.properties
+    compileSdkVersion (project.findProperty("compileSdkVersion") ?: 36).toString().toInteger()
+    ndkVersion = System.getenv("JITPACK_NDK_VERSION") ?: (project.findProperty("ndkVersion") ?: "29.0.14206865")
     
     def appVersionName = System.getenv("TERMUX_APP_VERSION_NAME") ?: ""
     def apkVersionTag = System.getenv("TERMUX_APK_VERSION_TAG") ?: ""
 
     defaultConfig {
-        minSdkVersion project.properties.minSdkVersion.toInteger()
-        targetSdkVersion project.properties.targetSdkVersion.toInteger()
+        minSdkVersion (project.findProperty("minSdkVersion") ?: 21).toString().toInteger()
+        targetSdkVersion (project.findProperty("targetSdkVersion") ?: 28).toString().toInteger()
         versionCode 118
         versionName "0.118.3"
 

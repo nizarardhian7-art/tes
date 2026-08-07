@@ -323,3 +323,31 @@ grep kotlin-gradle-plugin build.gradle
 - ✅ Semua XML resource (layout, values, values-night, drawable, xml, manifest) divalidasi → valid.
 - ✅ URL download diverifikasi live: platform-35/36 OK, platform-34 404 (fallback r02/AOSP),
   NDK r25c 404 → diganti r29, gradle-wrapper.jar v8.13.0 OK.
+
+---
+
+## v2.0 — Perombakan 2026-08-08 (lihat CHANGELOG.md untuk detail)
+
+### Perbaikan kritis
+1. **`Unresolved reference: compileSdk`** — injection compileSdk/ndkVersion sekarang
+   SELALU di dalam blok `android { }`; file tanpa blok android (settings.gradle.kts)
+   dilewati → error ini tidak mungkin muncul lagi.
+2. **Import backup tidak lagi download ulang** — export menyertakan NDK (`ndk/` tidak
+   lagi di-exclude), `.gradle/wrapper/dists/` (distribusi Gradle), `.gradle/caches/`,
+   `wrapper-template/`, `pkg-cache/`. Import me-restore semuanya; komponen yang sudah
+   valid di-skip.
+3. **Versi NDK konsisten 29.0.14206865** (sebelumnya 25.2.9519653 vs terinstall r29).
+4. **URL platform SDK benar** — platform-34 resmi = `platform-34-ext7_r03.zip`
+   (r01/r02/r04 404). Level lain di-resolve dari `repository2-1.xml` Google.
+5. **Log terstruktur** — prefix `@@LEVEL@@` (SECTION/STEP/INFO/OK/WARN/ERROR),
+   warna konsisten, `\r` progress bar di-refresh (tidak naik-turun), progress 0-100%.
+
+### Dependency untuk backup zip offline (detail lengkap di DEPENDENCIES.md)
+| Komponen | Folder di zip | Ukuran |
+|---|---|---|
+| Platform SDK 34/36 | `android-sdk/platforms/android-<api>/` | ~60 MB |
+| NDK r29 | `android-sdk/ndk/29.0.14206865/` | ~1.5 GB (extract) |
+| Build-tools 34/33 | `android-sdk/build-tools/<ver>/` | ~100 MB |
+| CMake 3.22/3.18 | `android-sdk/cmake/<ver>/` | ~50 MB |
+| Gradle 8.13/9.2.1 | `.gradle/wrapper/dists/gradle-<ver>-bin/<hash>/` | ~130 MB |
+| Paket APT | `pkg-cache/*.deb` | bervariasi |

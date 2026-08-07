@@ -5,11 +5,12 @@ import com.termux.builder.model.ErrorSummary
 /**
  * Parser output build (Gradle / CMake / Ninja).
  *
- * Menangkap sinyal penting dari aliran output teks:
- *  - Error (error:, FAILED, exception, failure)
- *  - Warning (warning:, WARNING)
- *  - Task Gradle selesai (> Task :app:assembleDebug)
- *  - Progress build (persen untuk CMake/Ninja)
+ * v2 — perbaikan:
+ *  - Paham prefix `@@LEVEL@@` dari [BuildLog] (section/step/ok/warn/error).
+ *  - Handle `\r` (progress bar Gradle/Ninja): baris dengan carriage-return
+ *    di-refresh (bukan ditumpuk), sehingga log tidak "naik-turun".
+ *  - Klasifikasi lebih akurat: `error:` / `BUILD FAILED` / `FAILURE:` = ERROR;
+ *    `warning:` = WARNING; task Gradle = TASK; `%` = PROGRESS.
  */
 class LogStreamParser {
 
@@ -19,14 +20,19 @@ class LogStreamParser {
     }
 
     companion object {
-        private val ERROR_RE = Regex("(?i).*(error:|\\bfailed\\b|\\bfailure\\b|exception|FAILED|BUILD FAILED).*")
+        // v2: tambah pola error compiler Kotlin: "e: file.kt:25: Unresolved reference: ..."
+        // dan Groovy/Gradle: "What went wrong", "Execution failed for task"
+        private val ERROR_RE = Regex("(?i).*(\\berror\\b|error:|\\bfailed\\b|\\bfailure\\b|BUILD FAILED|FAILURE:|exception|what went wrong|execution failed for task).*")
+        private val KOTLIN_ERROR_RE = Regex("(?m)^e:\\s+.*")
         private val WARNING_RE = Regex("(?i).*(warning:|WARNING).*")
+        private val KOTLIN_WARNING_RE = Regex("(?m)^w:\\s+.*")
         private val GRADLE_TASK_RE = Regex("^>\\s*Task\\s+([^\\s]+)")
-        private val GRADLE_PROGRESS_RE = Regex("^>\\s+([^\\n]+)$")
         private val PERCENT_RE = Regex("(\\d{1,3})%")
 
-        private const val MAX_ERROR_LINES = 20
-        private const val MAX_TAIL_LENGTH = 4000
+        private val LEVEL_PREFIX_RE = Regex("^@@(SECTION|STEP|INFO|OK|WARN|ERROR)@@")
+
+        private const val MAX_ERROR_LINES = 25
+        private const val MAX_TAIL_LENGTH = 6000
     }
 
     private val errorLines = ArrayDeque<String>()
@@ -34,7 +40,7 @@ class LogStreamParser {
     private var lastTask: String? = null
     private var lastProgressPercent = 0
 
-    /** Proses satu baris output; mengembalikan ringkasan bila baris adalah error. */
+    /** Proses satu baris output; mengembalikan klasifikasi. */
     fun processLine(line: String): ParsedLine {
         val kind = classify(line)
 
@@ -65,9 +71,27 @@ class LogStreamParser {
         return ParsedLine(kind, line)
     }
 
+    /**
+     * Klasifikasi baris.
+     * Prioritas: prefix level eksplisit (dari BuildLog) > pola Gradle/error/warning.
+     */
     fun classify(line: String): LineKind {
+        if (line.isBlank()) return LineKind.EMPTY
+
+        // Prefix eksplisit dari BuildLog menang
+        LEVEL_PREFIX_RE.find(line)?.let {
+            return when (it.groupValues[1]) {
+                "ERROR" -> LineKind.ERROR
+                "WARN" -> LineKind.WARNING
+                "OK" -> LineKind.SUCCESS
+                "SECTION", "STEP" -> LineKind.SECTION
+                else -> LineKind.INFO
+            }
+        }
+
         return when {
-            line.isBlank() -> LineKind.EMPTY
+            KOTLIN_ERROR_RE.matches(line.trim()) -> LineKind.ERROR
+            KOTLIN_WARNING_RE.matches(line.trim()) -> LineKind.WARNING
             GRADLE_TASK_RE.matches(line.trim()) -> LineKind.TASK
             line.contains("BUILD SUCCESSFUL") -> LineKind.SUCCESS
             line.contains("BUILD FAILED") -> LineKind.FAILED
@@ -76,6 +100,17 @@ class LogStreamParser {
             PERCENT_RE.containsMatchIn(line) -> LineKind.PROGRESS
             else -> LineKind.INFO
         }
+    }
+
+    /**
+     * Bersihkan baris dari carriage-return progress (mis.
+     * "\rDownload 45%" -> "Download 45%").
+     */
+    fun cleanLine(raw: String): String {
+        if (raw.isEmpty()) return raw
+        // Jika ada \r, ambil segmen terakhir (state terbaru progress bar)
+        val lastCr = raw.lastIndexOf('\r')
+        return if (lastCr >= 0) raw.substring(lastCr + 1).trim() else raw.trim()
     }
 
     fun getLastTask(): String? = lastTask
@@ -96,7 +131,7 @@ class LogStreamParser {
 }
 
 enum class LineKind {
-    ERROR, WARNING, INFO, TASK, PROGRESS, SUCCESS, FAILED, EMPTY
+    ERROR, WARNING, INFO, TASK, PROGRESS, SUCCESS, FAILED, SECTION, EMPTY
 }
 
 data class ParsedLine(

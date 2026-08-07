@@ -266,19 +266,32 @@ class BuildDashboardFragment : Fragment() {
 
     /** Append satu baris ke log dengan pewarnaan. */
     private fun appendLogLine(line: String, success: Boolean = false, error: Boolean = false, warning: Boolean = false) {
+        // v2: parse prefix terstruktur @@LEVEL@@ (dari BuildLog)
+        val parsed = parseLogLevel(line)
         val color = when {
             error -> ContextCompat.getColor(requireContext(), R.color.builder_log_error)
             success -> ContextCompat.getColor(requireContext(), R.color.builder_log_success)
             warning -> ContextCompat.getColor(requireContext(), R.color.builder_log_warning)
+            parsed.level == "ERROR" -> ContextCompat.getColor(requireContext(), R.color.builder_log_error)
+            parsed.level == "WARN" -> ContextCompat.getColor(requireContext(), R.color.builder_log_warning)
+            parsed.level == "OK" -> ContextCompat.getColor(requireContext(), R.color.builder_log_success)
+            parsed.level == "SECTION" -> ContextCompat.getColor(requireContext(), R.color.builder_log_section)
+            parsed.level == "STEP" -> ContextCompat.getColor(requireContext(), R.color.builder_log_step)
             isErrorLine(line) -> ContextCompat.getColor(requireContext(), R.color.builder_log_error)
             isWarningLine(line) -> ContextCompat.getColor(requireContext(), R.color.builder_log_warning)
             isSuccessLine(line) -> ContextCompat.getColor(requireContext(), R.color.builder_log_success)
             else -> ContextCompat.getColor(requireContext(), R.color.builder_log_text)
         }
 
+        // Section header: teks lebih besar & tebal
+        val style = if (parsed.level == "SECTION") android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL
+
         val start = logSb.length
-        logSb.append(line).append('\n')
+        logSb.append(parsed.text).append('\n')
         logSb.setSpan(ForegroundColorSpan(color), start, logSb.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        if (style == android.graphics.Typeface.BOLD) {
+            logSb.setSpan(android.text.style.StyleSpan(style), start, logSb.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        }
 
         // Batasi ukuran log (jaga memori)
         if (logSb.length > 200_000) {
@@ -293,6 +306,23 @@ class BuildDashboardFragment : Fragment() {
             logAppendedSinceScroll = 0
             logScroll.post { logScroll.fullScroll(View.FOCUS_DOWN) }
         }
+    }
+
+    /** Parse prefix log terstruktur `@@LEVEL@@text` dari BuildLog. */
+    private data class ParsedLogLine(val level: String, val text: String)
+
+    private fun parseLogLevel(line: String): ParsedLogLine {
+        if (line.startsWith("@@")) {
+            val endIdx = line.indexOf("@@", 2)
+            if (endIdx > 2) {
+                val level = line.substring(2, endIdx)
+                val text = line.substring(endIdx + 2)
+                if (level in setOf("SECTION", "STEP", "INFO", "OK", "WARN", "ERROR")) {
+                    return ParsedLogLine(level, text)
+                }
+            }
+        }
+        return ParsedLogLine("", line)
     }
 
     private fun isErrorLine(line: String): Boolean =
