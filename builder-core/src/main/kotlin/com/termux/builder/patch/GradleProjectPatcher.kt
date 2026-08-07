@@ -13,13 +13,13 @@ import java.io.File
  *
  * Pemetaan presisi dari patch_gradle_files() di build.sh.
  */
-class GradlePatcher(
+class GradleProjectPatcher(
     private val backupManager: BackupManager,
     private val executor: ProcessExecutor
 ) {
 
     companion object {
-        private const val LOG_TAG = "GradlePatcher"
+        private const val LOG_TAG = "GradleProjectPatcher"
     }
 
     /**
