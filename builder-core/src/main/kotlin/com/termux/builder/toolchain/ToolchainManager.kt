@@ -279,29 +279,36 @@ class ToolchainManager(
         }
     }
 
-    private fun installSystemPackages(progress: (String) -> Unit, lineCb: ProcessExecutor.LineCallback): Boolean {
-        progress("apt-get update...")
-        val update = executor.executeShellCommand(
-            "apt-get update -y 2>&1 | tail -n 5",
-            lineCallback = lineCb,
-            timeoutSeconds = 600
-        )
-        if (!update.isSuccess) {
-            progress("apt-get update gagal (${update.exitCode}) — melanjutkan...")
-        }
+    private fun installSystemPackages(progress: (String) -> Unit, lineCb: ProcessExecutor.LineCallback?): Boolean {
+    val env = mapOf("DEBIAN_FRONTEND" to "noninteractive")
 
-        val pkgList = APT_PACKAGES.joinToString(" ")
-        progress("apt-get install $pkgList")
-        val install = executor.executeShellCommand(
-            "apt-get install -y -o Dir::Cache::archives=$sdkDir/pkg-cache $pkgList",
-            lineCallback = lineCb,
-            timeoutSeconds = 1800
-        )
-        if (!install.isSuccess) {
-            return fail("apt-get install gagal (exit ${install.exitCode}): ${tailOf(install)}")
-        }
-        return true
+    progress("apt-get update...")
+    // HAPUS '| tail -n 5' karena menyebabkan SIGPIPE di bash pipefail!
+    val update = executor.executeShellCommand(
+        "apt-get update -y",
+        environment = env,
+        lineCallback = lineCb,
+        timeoutSeconds = 600
+    )
+    
+    // WAJIB: Jika apt-get update gagal, HENTIKAN proses (jangan dipaksa install)
+    if (!update.isSuccess) {
+        return fail("apt-get update gagal (exit ${update.exitCode}): ${tailOf(update)}. Pastikan perangkat terhubung ke internet.")
     }
+
+    val pkgList = APT_PACKAGES.joinToString(" ")
+    progress("apt-get install $pkgList")
+    val install = executor.executeShellCommand(
+        "apt-get install -y --fix-missing -o Dir::Cache::archives=$sdkDir/pkg-cache $pkgList",
+        environment = env,
+        lineCallback = lineCb,
+        timeoutSeconds = 1800
+    )
+    if (!install.isSuccess) {
+        return fail("apt-get install gagal (exit ${install.exitCode}): ${tailOf(install)}")
+    }
+    return true
+}
 
     /** Buat layout direktori SDK + cache dir. */
     private fun createSdkLayout() {

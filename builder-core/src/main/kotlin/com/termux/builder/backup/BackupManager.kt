@@ -205,10 +205,20 @@ class BackupManager(private val executor: ProcessExecutor) {
             lastError = "File backup kosong (0 byte): ${backup.absolutePath}"
             return false
         }
-        if (!executor.isExecutableAvailable("unzip")) {
-            lastError = "Binary 'unzip' tidak ditemukan. Jalankan setup toolchain / " +
-                "'apt-get install unzip' dulu sebelum import backup."
-            return false
+
+        // AUTO-INSTALL: Jika unzip / rsync belum ada, pasang otomatis via APT
+        if (!executor.isExecutableAvailable("unzip") || !executor.isExecutableAvailable("rsync")) {
+            lineCb?.onLine("► Binary 'unzip'/'rsync' belum ada. Memasang via APT...")
+            val pkgInstall = executor.executeShellCommand(
+                "apt-get update -y && apt-get install -y unzip rsync p7zip",
+                environment = mapOf("DEBIAN_FRONTEND" to "noninteractive"),
+                lineCallback = lineCb,
+                timeoutSeconds = 600
+            )
+            if (!pkgInstall.isSuccess) {
+                lastError = "Binary 'unzip'/'rsync' tidak ditemukan dan gagal dipasang otomatis via APT: ${tailOf(pkgInstall)}"
+                return false
+            }
         }
 
         val restoreDir = File("${BuilderPaths.DEFAULT_HOME_DIR}/.restore-temp")
