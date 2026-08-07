@@ -11,23 +11,6 @@ import java.io.File
 /**
  * Manager toolchain Android SDK/NDK/Gradle — pemetaan Kotlin dari auto_setup()
  * pada build.sh.
- *
- * Strategi eksekusi:
- *  - Operasi filesystem (mkdir, tulis file dummy, source.properties) -> Java File API (aman, cepat)
- *  - Operasi sistem (apt, symlink, chmod, download via wget/curl, ekstraksi) -> ProcessExecutor (AppShell)
- *
- * Seluruh proses dieksekusi dari dalam aplikasi (bukan script bash), sehingga
- * bisa dipantau via callback progress dan dibatalkan.
- *
- * **Perbaikan reliabilitas (v3):**
- *  - URL platform SDK dibuat bertingkat: r01 -> r02 (API 34 hanya r02 di Google,
- *    API 36 tersedia r01/r02) -> fallback AOSP Reginer.
- *  - URL NDK dipindah ke rilis yang masih ada: Lzhiyong/termux-ndk hanya menyediakan
- *    r29 (android-ndk-r29-aarch64.7z), bukan r25c zip (404). NDK versi di
- *    [BuilderPaths.DEFAULT_NDK_VERSION] harus konsisten dengan artifact yang diunduh.
- *  - ensureWrapperTemplate diperbaiki: selalu menulis gradle-wrapper.properties +
- *    gradlew minimal + men-download wrapper jar bila gradle CLI tidak tersedia.
- *  - Semua fase meneruskan output live ke [ProcessExecutor.LineCallback] default.
  */
 class ToolchainManager(
     private val context: Context,
@@ -69,11 +52,6 @@ class ToolchainManager(
             "lib/d8.jar", "lib/dx.jar", "lib/aapt2.jar", "lib/shrinkscript.jar"
         )
 
-        /**
-         * Konten AIDL dummy (python script dari build.sh).
-         * Script minimal yang meng-generate skeleton Java untuk interface aidl.
-         * Ditulis sebagai raw string: isi python TIDAK boleh mengandung `"""` ataupun `${`.
-         */
         private val DUMMY_AIDL_SCRIPT: String = "#!/usr/bin/env python3\n" +
             "import sys, os, re\n" +
             "args = sys.argv[1:]\n" +
@@ -136,16 +114,8 @@ class ToolchainManager(
             "parcelable android.view.MotionEvent;\n"
     }
 
-    /** $SDK_DIR/ndk/<version> — pakai versi yang terpasang bila ada. */
     val ndkDir: String get() = "$sdkDir/ndk/${installedNdkVersion() ?: ndkVersion}"
 
-    /**
-     * Alasan kegagalan TERAKHIR dari [setupToolchain] (atau sub-tahapnya bila
-     * dipanggil langsung). Selalu diisi pesan yang jelas dan spesifik — tidak
-     * pernah dibiarkan null saat sebuah tahap mengembalikan `false`, supaya
-     * UI tidak lagi menampilkan pesan generik "Setup toolchain gagal" tanpa
-     * detail.
-     */
     var lastError: String? = null
         private set
 
@@ -155,18 +125,12 @@ class ToolchainManager(
         return false
     }
 
-    /** Ringkas keluaran gagal (stderr diprioritaskan, fallback ke stdout) untuk pesan error. */
     private fun tailOf(result: com.termux.builder.model.CommandResult, maxLen: Int = 300): String {
         val text = result.stderr.ifBlank { result.stdout }.trim()
         val lastLines = text.lines().filter { it.isNotBlank() }.takeLast(3).joinToString(" | ")
         return lastLines.take(maxLen).ifBlank { "(exit ${result.exitCode}, tidak ada output)" }
     }
 
-    // ---------------------------------------------------------------------
-    // Status checks
-    // ---------------------------------------------------------------------
-
-    /** True bila SDK sudah siap (directory + license + minimal satu platform). */
     fun isSdkReady(): Boolean {
         val platformsDir = File("$sdkDir/platforms")
         val hasPlatform = platformsDir.isDirectory &&
@@ -174,32 +138,20 @@ class ToolchainManager(
         return hasPlatform && File("$sdkDir/licenses/android-sdk-license").exists()
     }
 
-    /** True bila NDK sudah terpasang (versi mana pun yang valid). */
     fun isNdkInstalled(): Boolean {
         return installedNdkVersions().any { v ->
             File("$sdkDir/ndk/$v/ndk-build").exists() || File("$sdkDir/ndk/$v/build/ndk-build").exists()
         }
     }
 
-    // ---------------------------------------------------------------------
-    // Setup lengkap
-    // ---------------------------------------------------------------------
-
-    /**
-     * Setup lengkap toolchain (pemetaan auto_setup() dari build.sh).
-     * @param profile profil hardware untuk jvm args
-     * @param progress callback pesan progress
-     */
     fun setupToolchain(profile: HardwareProfile, progress: (String) -> Unit): Boolean {
         lastError = null
-        // Line callback default: terima semua output live dari subprocess.
         val lineCb = object : ProcessExecutor.LineCallback {
             override fun onLine(line: String) {
                 if (line.isNotBlank()) progress(line.take(400))
             }
         }
 
-        // ---- 0. PREFLIGHT: bash & environment dasar harus ada dulu ----
         val bashExists = File("${BuilderPaths.PREFIX_BIN_DIR}/bash").exists()
         val shExists = File("${BuilderPaths.PREFIX_BIN_DIR}/sh").exists()
         if (!bashExists && !shExists) {
@@ -216,19 +168,16 @@ class ToolchainManager(
 
         progress("Menginstall paket sistem (APT)...")
         if (!installSystemPackages(progress, lineCb)) {
-            return false // installSystemPackages sudah mengisi lastError
+            return false
         }
 
-        // ---- Verifikasi nyata: binary yang diinstall APT benar-benar ada ----
         val criticalBins = listOf("wget", "curl", "unzip", "zip", "rsync", "dpkg", "cmake", "ninja", "python3")
         val missing = executor.findMissingBinaries(criticalBins)
         if (missing.isNotEmpty()) {
             return fail(
                 "apt-get install melaporkan sukses, tapi binary berikut tetap tidak " +
                     "ditemukan setelah install: ${missing.joinToString(", ")}. " +
-                    "Kemungkinan penyebab: repo APT Termux belum ter-set/unreachable, " +
-                    "atau tidak ada koneksi internet saat instalasi. Coba jalankan " +
-                    "'apt-get update' manual dari Termux shell app ini untuk melihat error aslinya."
+                    "Coba jalankan 'apt-get update' manual dari Termux shell untuk melihat error aslinya."
             )
         }
 
@@ -240,16 +189,16 @@ class ToolchainManager(
 
         progress("Mendownload platform SDK 34...")
         if (!downloadPlatformSdk(34, progress, lineCb)) {
-            return false // downloadPlatformSdk sudah mengisi lastError
+            return false
         }
 
         writeSdkLicense()
         writeGlobalGradleProperties(profile)
 
         if (!isNdkInstalled()) {
-            progress("Mendownload Android NDK r25c (besar, mohon tunggu)...")
+            progress("Mendownload Android NDK (besar, mohon tunggu)...")
             if (!installNdk(progress, lineCb)) {
-                return false // installNdk sudah mengisi lastError
+                return false
             }
         } else {
             progress("NDK sudah terpasang.")
@@ -262,12 +211,7 @@ class ToolchainManager(
         return true
     }
 
-    // ---------------------------------------------------------------------
-    // SDK layout & packages
-    // ---------------------------------------------------------------------
-
     private fun ensureStorageAccess(lineCb: ProcessExecutor.LineCallback) {
-        // termux-setup-storage: membuat symlink ~/storage ke /sdcard
         val homeDir = File(BuilderPaths.DEFAULT_HOME_DIR)
         val storageLink = File(homeDir, "storage")
         if (!storageLink.exists()) {
@@ -280,45 +224,49 @@ class ToolchainManager(
     }
 
     private fun installSystemPackages(progress: (String) -> Unit, lineCb: ProcessExecutor.LineCallback?): Boolean {
-    val env = mapOf("DEBIAN_FRONTEND" to "noninteractive")
+        val env = mapOf("DEBIAN_FRONTEND" to "noninteractive")
 
-    progress("apt-get update...")
-    // HAPUS '| tail -n 5' karena menyebabkan SIGPIPE di bash pipefail!
-    val update = executor.executeShellCommand(
-        "apt-get update -y",
-        environment = env,
-        lineCallback = lineCb,
-        timeoutSeconds = 600
-    )
-    
-    // WAJIB: Jika apt-get update gagal, HENTIKAN proses (jangan dipaksa install)
-    if (!update.isSuccess) {
-        return fail("apt-get update gagal (exit ${update.exitCode}): ${tailOf(update)}. Pastikan perangkat terhubung ke internet.")
+        // WAJIB: Pastikan folder partial untuk APT cache dibuat sebelum apt-get run!
+        File("$sdkDir/pkg-cache/partial").mkdirs()
+
+        progress("apt-get update...")
+        // Tanpa pipe '| tail -n 5' agar tidak pemicu SIGPIPE di bash pipefail
+        val update = executor.executeShellCommand(
+            "apt-get update -y",
+            environment = env,
+            lineCallback = lineCb,
+            timeoutSeconds = 600
+        )
+        if (!update.isSuccess) {
+            return fail("apt-get update gagal (exit ${update.exitCode}): ${tailOf(update)}. Pastikan perangkat terhubung ke internet.")
+        }
+
+        val pkgList = APT_PACKAGES.joinToString(" ")
+        progress("apt-get install $pkgList")
+        val install = executor.executeShellCommand(
+            "apt-get install -y --fix-missing -o Dir::Cache::archives=$sdkDir/pkg-cache $pkgList",
+            environment = env,
+            lineCallback = lineCb,
+            timeoutSeconds = 1800
+        )
+        if (!install.isSuccess) {
+            return fail("apt-get install gagal (exit ${install.exitCode}): ${tailOf(install)}")
+        }
+        return true
     }
 
-    val pkgList = APT_PACKAGES.joinToString(" ")
-    progress("apt-get install $pkgList")
-    val install = executor.executeShellCommand(
-        "apt-get install -y --fix-missing -o Dir::Cache::archives=$sdkDir/pkg-cache $pkgList",
-        environment = env,
-        lineCallback = lineCb,
-        timeoutSeconds = 1800
-    )
-    if (!install.isSuccess) {
-        return fail("apt-get install gagal (exit ${install.exitCode}): ${tailOf(install)}")
-    }
-    return true
-}
-
-    /** Buat layout direktori SDK + cache dir. */
     private fun createSdkLayout() {
         listOf(
-            "$sdkDir/pkg-cache", "$sdkDir/platforms", "$sdkDir/build-tools",
-            "$sdkDir/licenses", "$sdkDir/cmake", "$sdkDir/ndk"
+            "$sdkDir/pkg-cache",
+            "$sdkDir/pkg-cache/partial",
+            "$sdkDir/platforms",
+            "$sdkDir/build-tools",
+            "$sdkDir/licenses",
+            "$sdkDir/cmake",
+            "$sdkDir/ndk"
         ).forEach { File(it).mkdirs() }
     }
 
-    /** Tulis file lisensi SDK. */
     private fun writeSdkLicense() {
         val license = File("$sdkDir/licenses/android-sdk-license")
         if (!license.exists()) {
@@ -326,14 +274,12 @@ class ToolchainManager(
         }
     }
 
-    /** Tulis ~/.gradle/gradle.properties global. */
     private fun writeGlobalGradleProperties(profile: HardwareProfile) {
         val gradleHome = File(BuilderPaths.DEFAULT_HOME_DIR, ".gradle")
         gradleHome.mkdirs()
         File(gradleHome, "gradle.properties").writeText(gradlePropertiesTemplate(profile))
     }
 
-    /** Template ~/.gradle/gradle.properties (dari build.sh auto_setup). */
     private fun gradlePropertiesTemplate(profile: HardwareProfile): String {
         val javaHome = "${BuilderPaths.PREFIX_BIN_DIR}/../lib/jvm/java-17-openjdk"
         return buildString {
@@ -356,29 +302,14 @@ class ToolchainManager(
         }
     }
 
-    // ---------------------------------------------------------------------
-    // Platform SDK
-    // ---------------------------------------------------------------------
-
-    /**
-     * Download & ekstrak platform SDK untuk API level.
-     *
-     * Strategi URL (karena tidak semua revisi ada di dl.google.com):
-     *  1. coba `platform-<api>_r01.zip`, lalu `_r02.zip`, dst sampai sukses;
-     *  2. fallback AOSP Reginer (android.jar + framework.aidl).
-     */
     fun downloadPlatformSdk(apiLevel: Int, progress: (String) -> Unit = { _ -> }, lineCb: ProcessExecutor.LineCallback? = null): Boolean {
         val platformDir = File("$sdkDir/platforms/android-$apiLevel")
         val androidJar = File(platformDir, "android.jar")
 
-        // Bersihkan platform lama yang tidak dipakai (build.sh menghapus 13 & 14)
         listOf("android-13", "android-14").forEach {
             File("$sdkDir/platforms/$it").deleteRecursively()
         }
 
-        // Validasi platform yang sudah ada: android.jar harus konsisten
-        // dengan core-for-system-modules.jar (cek ukuran) — build.sh memakai
-        // trick ini untuk mendeteksi platform corrupt.
         if (androidJar.exists()) {
             val coreJar = File(platformDir, "core-for-system-modules.jar")
             if (coreJar.exists() && androidJar.length() != coreJar.length()) {
@@ -395,22 +326,21 @@ class ToolchainManager(
         tmpExtract.mkdirs()
 
         if (!executor.isExecutableAvailable("wget")) {
-            return fail("Tidak bisa download platform SDK: binary 'wget' tidak ditemukan di PREFIX/bin. Pastikan apt-get install wget sukses.")
+            return fail("Tidak bisa download platform SDK: binary 'wget' tidak ditemukan. Pastikan apt-get install wget sukses.")
         }
 
-        // Coba r01..r04
         var downloaded = false
         var lastDl: com.termux.builder.model.CommandResult? = null
         for (revision in 1..4) {
             val url = "https://dl.google.com/android/repository/platform-${apiLevel}_r${revision.toString().padStart(2, '0')}.zip"
             progress("Mencoba download platform-$apiLevel r$revision...")
             val download = executor.executeShellCommand(
-                "wget -O '$tmpZip' '$url' && test -s '$tmpZip' && echo OK || echo FAIL",
+                "wget -O '$tmpZip' '$url' && test -s '$tmpZip'",
                 lineCallback = lineCb,
                 timeoutSeconds = 600
             )
             lastDl = download
-            if (download.isSuccess && download.stdout.contains("OK")) {
+            if (download.isSuccess && tmpZip.exists() && tmpZip.length() > 0) {
                 downloaded = true
                 break
             }
@@ -418,11 +348,11 @@ class ToolchainManager(
 
         if (downloaded) {
             val extract = executor.executeShellCommand(
-                "unzip -o -q '$tmpZip' -d '$tmpExtract' 2>/dev/null && echo OK || echo FAIL",
+                "unzip -o -q '$tmpZip' -d '$tmpExtract' 2>/dev/null",
                 lineCallback = lineCb,
                 timeoutSeconds = 300
             )
-            if (extract.isSuccess && extract.stdout.contains("OK")) {
+            if (extract.isSuccess) {
                 tmpZip.deleteRecursively()
                 val extracted = tmpExtract.listFiles()?.firstOrNull { it.isDirectory }
                 if (extracted != null && File(extracted, "android.jar").exists()) {
@@ -438,27 +368,22 @@ class ToolchainManager(
         tmpExtract.deleteRecursively()
         tmpZip.deleteRecursively()
 
-        // Fallback: AOSP android.jar dari Reginer
         Logger.logInfo(LOG_TAG, "Official download gagal, mencoba fallback AOSP platform...")
         progress("Official download gagal — fallback AOSP android.jar...")
         platformDir.mkdirs()
         val fb = executor.executeShellCommand(
             "wget -O '${File(platformDir, "android.jar").absolutePath}' " +
-                "'https://github.com/Reginer/aosp-android-jar/raw/main/android-$apiLevel/android.jar' && echo OK || echo FAIL",
+                "'https://github.com/Reginer/aosp-android-jar/raw/main/android-$apiLevel/android.jar'",
             lineCallback = lineCb,
             timeoutSeconds = 900
         )
-        if (fb.isSuccess && fb.stdout.contains("OK")) {
+        if (fb.isSuccess && File(platformDir, "android.jar").length() > 0) {
             writePlatformSourceProperties(platformDir, apiLevel)
             return true
         }
         return fail(
-            "Download platform SDK android-$apiLevel gagal total (official r01-r04 maupun " +
-                "fallback AOSP). Alasan percobaan terakhir (official): ${lastDl?.let { tailOf(it) } ?: "-"}. " +
-                "Alasan fallback AOSP: ${tailOf(fb)}. Ini biasanya berarti TIDAK ADA KONEKSI " +
-                "INTERNET yang berfungsi dari dalam environment app, atau DNS/sertifikat SSL " +
-                "bermasalah — coba 'ping dl.google.com' dan 'wget https://google.com' manual di " +
-                "Termux shell app ini untuk konfirmasi."
+            "Download platform SDK android-$apiLevel gagal total (official r01-r04 maupun fallback AOSP). " +
+                "Alasan official: ${lastDl?.let { tailOf(it) } ?: "-"}. Alasan fallback: ${tailOf(fb)}."
         )
     }
 
@@ -471,18 +396,12 @@ class ToolchainManager(
         }
     }
 
-    // ---------------------------------------------------------------------
-    // Build-tools & CMake dummy
-    // ---------------------------------------------------------------------
-
-    /** Buat build-tools dummy (symlink ke PREFIX/bin + dummy execs/jars). */
     fun setupDummyBuildTools(version: String) {
         val btDir = File("$sdkDir/build-tools/$version")
         File(btDir, "lib").mkdirs()
         File(btDir, "renderscript/include").mkdirs()
         File(btDir, "renderscript/clang-include").mkdirs()
 
-        // Symlink tools dari PREFIX/bin
         BT_TOOLS.forEach { tool ->
             val prefixBin = File("${BuilderPaths.PREFIX_BIN_DIR}/$tool")
             if (prefixBin.exists()) {
@@ -493,14 +412,12 @@ class ToolchainManager(
             }
         }
 
-        // dx -> d8
         if (File("${BuilderPaths.PREFIX_BIN_DIR}/d8").exists() && !File(btDir, "dx").exists()) {
             executor.executeShellCommand(
                 "ln -sf '${BuilderPaths.PREFIX_BIN_DIR}/d8' '${File(btDir, "dx").absolutePath}'"
             )
         }
 
-        // AIDL: symlink jika ada, else dummy python script
         val aidlLink = File(btDir, "aidl")
         val prefixAidl = File("${BuilderPaths.PREFIX_BIN_DIR}/aidl")
         if (prefixAidl.exists()) {
@@ -510,7 +427,6 @@ class ToolchainManager(
             aidlLink.setExecutable(true)
         }
 
-        // Dummy execs (exit 0)
         DUMMY_EXECS.forEach { name ->
             val f = File(btDir, name)
             if (!f.exists()) {
@@ -519,7 +435,6 @@ class ToolchainManager(
             }
         }
 
-        // Dummy jars (empty zip)
         val emptyZip = Base64.decode("UEsFBgAAAAAAAAAAAAAAAAAAAAAAAA==", Base64.DEFAULT)
         DUMMY_JARS.forEach { rel ->
             val f = File(btDir, rel)
@@ -529,16 +444,13 @@ class ToolchainManager(
             }
         }
 
-        // source.properties
         File(btDir, "source.properties").writeText("Pkg.PluginsSource=Android SDK\nPkg.Revision=$version\n")
     }
 
-    /** Buat cmake dummy (symlink ke PREFIX/bin/cmake & ninja + source.properties). */
     fun setupDummyCmake(version: String) {
         val cmakeDir = File("$sdkDir/cmake/$version")
         File(cmakeDir, "bin").mkdirs()
 
-        // Pastikan ninja terinstall
         if (!File("${BuilderPaths.PREFIX_BIN_DIR}/ninja").exists()) {
             executor.executeShellCommand("pkg install ninja -y 2>/dev/null || true", timeoutSeconds = 300)
         }
@@ -557,24 +469,10 @@ class ToolchainManager(
         )
     }
 
-    // ---------------------------------------------------------------------
-    // NDK
-    // ---------------------------------------------------------------------
-
-    /**
-     * Download & ekstrak NDK r25c (aarch64) bila belum ada.
-     *
-     * Catatan: rilis Lzhiyong/termux-ndk TIDAK lagi menyediakan android-ndk-r25c-aarch64.zip
-     * (404). Rilis yang masih ada: `android-ndk-r29-aarch64.7z` (tag android-ndk).
-     * Engine men-download r29 dan mengekstrak via 7z (p7zip), lalu memperlakukan
-     * versi tersebut sebagai [ndkVersion] yang dikonfigurasi.
-     */
     private fun installNdk(progress: (String) -> Unit, lineCb: ProcessExecutor.LineCallback?): Boolean {
-        // Jika versi r25c dikonfigurasi, tapi rilisnya 404, gunakan r29.
         val downloadUrl: String
         val actualVersion: String
         if (ndkVersion == BuilderPaths.DEFAULT_NDK_VERSION) {
-            // DEFAULT_NDK_VERSION == "25.2.9519653" — rilis r25c sudah tidak ada → pakai r29
             downloadUrl = "https://github.com/Lzhiyong/termux-ndk/releases/download/android-ndk/android-ndk-r29-aarch64.7z"
             actualVersion = "29.0.14206865"
         } else {
@@ -587,49 +485,46 @@ class ToolchainManager(
         tmpDir.mkdirs()
 
         progress("Mendownload NDK r29 (sekitar 400 MB, mohon tunggu)...")
-        val dl = executor.executeShellCommand(
-            "wget --show-progress -O '$ndkZip' '$downloadUrl' && echo OK || echo FAIL",
+        var dl = executor.executeShellCommand(
+            "wget --show-progress -O '$ndkZip' '$downloadUrl'",
             lineCallback = lineCb,
             timeoutSeconds = 2400
         )
-        if (!dl.isSuccess || !dl.stdout.contains("OK")) {
+        if (!dl.isSuccess || !ndkZip.exists() || ndkZip.length() == 0L) {
             progress("Gagal mendownload NDK (wget). Mencoba curl...")
-            val dl2 = executor.executeShellCommand(
-                "curl -fsSL --retry 2 -o '$ndkZip' '$downloadUrl' && echo OK || echo FAIL",
+            dl = executor.executeShellCommand(
+                "curl -fsSL --retry 2 -o '$ndkZip' '$downloadUrl'",
                 lineCallback = lineCb,
                 timeoutSeconds = 2400
             )
-            if (!dl2.isSuccess || !dl2.stdout.contains("OK")) {
-                return fail("Download NDK gagal (wget & curl). wget: ${tailOf(dl)} | curl: ${tailOf(dl2)}")
+            if (!dl.isSuccess || !ndkZip.exists() || ndkZip.length() == 0L) {
+                return fail("Download NDK gagal (wget & curl): ${tailOf(dl)}")
             }
         }
 
         progress("Mengekstrak NDK (7z)...")
-        // .7z memerlukan 7z (p7zip) — coba unzip dulu (zip), lalu 7z
-        var ex: com.termux.builder.model.CommandResult = executor.executeShellCommand(
-            "unzip -o '$ndkZip' -d '$tmpDir' && echo OK || echo FAIL",
+        var ex = executor.executeShellCommand(
+            "unzip -o '$ndkZip' -d '$tmpDir'",
             lineCallback = lineCb,
             timeoutSeconds = 900
         )
-        if (!ex.isSuccess || !ex.stdout.contains("OK")) {
-            // Fallback 7z
+        if (!ex.isSuccess) {
             ex = executor.executeShellCommand(
-                "7z x -y -o'$tmpDir' '$ndkZip' && echo OK || echo FAIL",
+                "7z x -y -o'$tmpDir' '$ndkZip'",
                 lineCallback = lineCb,
                 timeoutSeconds = 900
             )
         }
-        if (!ex.isSuccess || !ex.stdout.contains("OK")) {
+        if (!ex.isSuccess) {
             val reason = tailOf(ex)
             ndkZip.deleteRecursively()
             return fail("Gagal mengekstrak NDK (unzip/7z): $reason")
         }
 
-        // Cari folder NDK di dalam tmp (bisa android-ndk-r29 / android-ndk-r25c)
         val extracted = findNdkRoot(tmpDir) ?: run {
             ndkZip.deleteRecursively()
             tmpDir.deleteRecursively()
-            fail("Folder NDK (ndk-build) tidak ditemukan di dalam arsip yang diekstrak — arsip mungkin corrupt/tidak lengkap.")
+            fail("Folder NDK (ndk-build) tidak ditemukan di dalam arsip yang diekstrak.")
             null
         } ?: return false
 
@@ -642,7 +537,6 @@ class ToolchainManager(
         return true
     }
 
-    /** Cari direktori akar NDK (mengandung ndk-build / build/ndk-build). */
     private fun findNdkRoot(dir: File): File? {
         val stack = ArrayDeque<File>()
         stack.add(dir)
@@ -661,14 +555,11 @@ class ToolchainManager(
         return null
     }
 
-    /** Perbaiki permission NDK + symlink make/python3 + fix shebang (dari build.sh). */
     fun fixNdkPermissions(progress: (String) -> Unit, lineCb: ProcessExecutor.LineCallback? = null) {
         if (!File(ndkDir).exists()) return
 
-        // chmod -R +x
         executor.executeShellCommand("chmod -R +x '$ndkDir' 2>/dev/null || true", lineCallback = lineCb, timeoutSeconds = 300)
 
-        // prebuilt/linux-aarch64/bin dengan symlink make & python3
         val prebuiltBin = File("$ndkDir/prebuilt/linux-aarch64/bin")
         prebuiltBin.mkdirs()
         val prefixBin = BuilderPaths.PREFIX_BIN_DIR
@@ -679,7 +570,6 @@ class ToolchainManager(
             executor.executeShellCommand("ln -sf '$prefixBin/python3' '${File(prebuiltBin, "python3").absolutePath}' 2>/dev/null || true", lineCallback = lineCb)
         }
 
-        // termux-fix-shebang untuk semua script NDK
         executor.executeShellCommand(
             "command -v termux-fix-shebang >/dev/null 2>&1 && " +
                 "find '$ndkDir' -type f \\( -name '*.sh' -o -name 'ndk-build' \\) -exec termux-fix-shebang {} \\; 2>/dev/null || true",
@@ -688,18 +578,6 @@ class ToolchainManager(
         )
     }
 
-    // ---------------------------------------------------------------------
-    // Wrapper template
-    // ---------------------------------------------------------------------
-
-    /**
-     * Siapkan wrapper template (gradlew + gradle-wrapper.jar + properties).
-     *
-     * Perbaikan v3: selalu menulis `gradlew` + `gradle-wrapper.properties` yang valid,
-     * dan men-download `gradle-wrapper.jar` bila gradle CLI tidak tersedia
-     * (sebelumnya hanya mengandalkan `gradle wrapper` — jika gradle tidak ada,
-     * folder wrapper kosong sehingga build user gagal).
-     */
     fun ensureWrapperTemplate(progress: (String) -> Unit, lineCb: ProcessExecutor.LineCallback? = null) {
         val wrapperDir = File(BuilderPaths.DEFAULT_WRAPPER_DIR)
         val wrapperSub = File(wrapperDir, "gradle/wrapper")
@@ -708,28 +586,16 @@ class ToolchainManager(
         val jar = File(wrapperSub, "gradle-wrapper.jar")
         if (!jar.exists() || jar.length() < 10_000) {
             progress("Mendownload gradle-wrapper.jar template...")
-            val dl = executor.executeShellCommand(
-                "wget -q -O '${jar.absolutePath}' " +
-                    "'https://raw.githubusercontent.com/gradle/gradle/v8.13.0/gradle/wrapper/gradle-wrapper.jar' 2>/dev/null; " +
-                    "test -s '${jar.absolutePath}' && echo OK || echo FAIL",
+            executor.executeShellCommand(
+                "wget -q -O '${jar.absolutePath}' 'https://raw.githubusercontent.com/gradle/gradle/v8.13.0/gradle/wrapper/gradle-wrapper.jar' || " +
+                    "curl -fsSL -o '${jar.absolutePath}' 'https://raw.githubusercontent.com/gradle/gradle/v8.13.0/gradle/wrapper/gradle-wrapper.jar' || true",
                 lineCallback = lineCb,
                 timeoutSeconds = 300
             )
-            if (!dl.isSuccess || !dl.stdout.contains("OK")) {
-                // Fallback curl
-                executor.executeShellCommand(
-                    "curl -fsSL -o '${jar.absolutePath}' " +
-                        "'https://raw.githubusercontent.com/gradle/gradle/v8.13.0/gradle/wrapper/gradle-wrapper.jar' 2>/dev/null || true",
-                    lineCallback = lineCb,
-                    timeoutSeconds = 300
-                )
-            }
         }
 
-        // Buat settings.gradle minimal untuk wrapper template
         File(wrapperDir, "settings.gradle").writeText("rootProject.name='wrapper-template'\n")
 
-        // Selalu tulis gradlew minimal + properties (agar bisa dipakai tanpa gradle CLI)
         val gradlew = File(wrapperDir, "gradlew")
         if (!gradlew.exists()) {
             gradlew.writeText("#!/bin/sh\n# minimal gradlew (wrapper)\nexec \"$0\" \"$@\"\n")
@@ -745,7 +611,6 @@ class ToolchainManager(
             )
         }
 
-        // Jalankan gradle wrapper bila gradle CLI tersedia (perbarui jar + gradlew resmi)
         if (File("${BuilderPaths.PREFIX_BIN_DIR}/gradle").exists()) {
             executor.executeShellCommand(
                 "cd '${wrapperDir.absolutePath}' && gradle wrapper --gradle-version 8.13 --no-daemon -q 2>/dev/null || true",
@@ -755,17 +620,11 @@ class ToolchainManager(
         }
     }
 
-    // ---------------------------------------------------------------------
-    // Helpers publik
-    // ---------------------------------------------------------------------
-
-    /** Daftar versi NDK yang benar-benar terpasang (folder di $SDK_DIR/ndk). */
     fun installedNdkVersions(): List<String> {
         val ndkRoot = File("$sdkDir/ndk")
         if (!ndkRoot.isDirectory) return emptyList()
         return ndkRoot.listFiles()?.filter { it.isDirectory }?.map { it.name }?.sorted() ?: emptyList()
     }
 
-    /** Versi NDK yang terpasang (folder pertama) atau null. */
     fun installedNdkVersion(): String? = installedNdkVersions().firstOrNull()
 }

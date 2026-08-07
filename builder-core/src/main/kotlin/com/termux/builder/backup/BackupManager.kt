@@ -29,8 +29,7 @@ class BackupManager(private val executor: ProcessExecutor) {
 
     /**
      * Alasan kegagalan TERAKHIR dari export/import. Selalu diisi pesan spesifik
-     * ketika sebuah operasi mengembalikan null/false — sebelumnya semua error
-     * dibuang lewat `2>/dev/null` sehingga UI tidak pernah tahu penyebabnya.
+     * ketika sebuah operasi mengembalikan null/false.
      */
     var lastError: String? = null
         private set
@@ -156,12 +155,12 @@ class BackupManager(private val executor: ProcessExecutor) {
         val zipPath = File(BuilderPaths.DEFAULT_OUTPUT_DIR, zipName)
         File(BuilderPaths.DEFAULT_OUTPUT_DIR).mkdirs()
         val result = executor.executeShellCommand(
-            "cd '${stage.absolutePath}' && zip -r '${zipPath.absolutePath}' . && echo OK || echo FAIL",
+            "cd '${stage.absolutePath}' && zip -r '${zipPath.absolutePath}' .",
             lineCallback = lineCb,
             timeoutSeconds = 900
         )
         stage.deleteRecursively()
-        if (!result.isSuccess || !result.stdout.contains("OK")) {
+        if (!result.isSuccess || !zipPath.exists() || zipPath.length() == 0L) {
             lastError = "Gagal membuat ZIP backup (exit ${result.exitCode}): ${tailOf(result)}"
             return null
         }
@@ -173,7 +172,6 @@ class BackupManager(private val executor: ProcessExecutor) {
      * @return true bila berhasil
      */
     fun importEnvironmentBackup(sdkDir: String = BuilderPaths.DEFAULT_SDK_DIR): Boolean {
-        // Cari backup terbaru
         val outputDir = File(BuilderPaths.DEFAULT_OUTPUT_DIR)
         val candidates = ArrayList<File>()
         outputDir.listFiles()?.filter { it.name.startsWith("builder-backup-complete-") && it.extension == "zip" }?.forEach { candidates.add(it) }
@@ -185,10 +183,8 @@ class BackupManager(private val executor: ProcessExecutor) {
     }
 
     /**
-     * Import environment backup dari file ZIP spesifik (mis. dipilih via SAF).
-     * @param lineCb opsional — bila diisi, setiap baris output unzip/rsync/dpkg
-     *   diteruskan live ke UI (panel log), bukan hanya hasil akhir true/false.
-     * @return true bila berhasil. Bila false, cek [lastError] untuk alasannya.
+     * Import environment backup dari file ZIP spesifik.
+     * @return true bila berhasil.
      */
     fun importEnvironmentBackupFromFile(
         backup: File,
@@ -206,7 +202,7 @@ class BackupManager(private val executor: ProcessExecutor) {
             return false
         }
 
-        // AUTO-INSTALL: Jika unzip / rsync belum ada, pasang otomatis via APT
+        // Auto-install unzip & rsync jika belum ada
         if (!executor.isExecutableAvailable("unzip") || !executor.isExecutableAvailable("rsync")) {
             lineCb?.onLine("► Binary 'unzip'/'rsync' belum ada. Memasang via APT...")
             val pkgInstall = executor.executeShellCommand(
@@ -216,7 +212,7 @@ class BackupManager(private val executor: ProcessExecutor) {
                 timeoutSeconds = 600
             )
             if (!pkgInstall.isSuccess) {
-                lastError = "Binary 'unzip'/'rsync' tidak ditemukan dan gagal dipasang otomatis via APT: ${tailOf(pkgInstall)}"
+                lastError = "Binary 'unzip'/'rsync' gagal dipasang via APT: ${tailOf(pkgInstall)}"
                 return false
             }
         }
@@ -225,19 +221,22 @@ class BackupManager(private val executor: ProcessExecutor) {
         restoreDir.deleteRecursively()
         restoreDir.mkdirs()
 
+        // Ekstrak tanpa '&& echo OK || echo FAIL' yang rawan jebakan exit code 1 (warning) dari unzip
         val extract = executor.executeShellCommand(
-            "unzip -o '${backup.absolutePath}' -d '${restoreDir.absolutePath}/' && echo OK || echo FAIL",
+            "unzip -o '${backup.absolutePath}' -d '${restoreDir.absolutePath}/'",
             lineCallback = lineCb,
             timeoutSeconds = 1800
         )
-        if (!extract.isSuccess || !extract.stdout.contains("OK")) {
-            lastError = "Gagal ekstrak ZIP backup (exit ${extract.exitCode}): ${tailOf(extract)}. " +
-                "Cek apakah file '${backup.name}' adalah ZIP hasil export builder ini dan tidak corrupt."
+
+        // Exit code 0 (OK) dan 1 (warning ringan) pada unzip dianggap berhasil jika file restore terisi
+        val isExtractSuccess = (extract.exitCode == 0 || extract.exitCode == 1) && restoreDir.listFiles()?.isNotEmpty() == true
+        if (!isExtractSuccess) {
+            lastError = "Gagal ekstrak ZIP backup (exit ${extract.exitCode}): ${tailOf(extract)}. Cek apakah file '${backup.name}' corrupt."
             restoreDir.deleteRecursively()
             return false
         }
 
-        // Sanity check: apakah isi ZIP memang berisi struktur backup yang diharapkan?
+        // Sanity check
         val hasKnownContent = listOf("pkg-cache", "android-sdk", ".gradle", "wrapper-template")
             .any { File(restoreDir, it).exists() }
         if (!hasKnownContent) {
@@ -248,7 +247,7 @@ class BackupManager(private val executor: ProcessExecutor) {
             return false
         }
 
-        // Install .deb offline (best-effort, tidak fatal bila sebagian gagal — tapi dicatat)
+        // Install .deb offline (jika ada di cache)
         val pkgCache = File(restoreDir, "pkg-cache")
         val debs = pkgCache.listFiles()?.filter { it.extension == "deb" }
         if (!debs.isNullOrEmpty()) {
@@ -263,7 +262,7 @@ class BackupManager(private val executor: ProcessExecutor) {
             }
         }
 
-        // Restore SDK (tanpa ndk — NDK di-restore dari archive terpisah)
+        // Restore SDK, .gradle, wrapper-template
         val sdkBackup = File(restoreDir, "android-sdk")
         if (sdkBackup.exists()) {
             val r = executor.executeShellCommand(
