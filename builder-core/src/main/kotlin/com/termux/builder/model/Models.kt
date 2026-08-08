@@ -130,7 +130,7 @@ data class BuildResult(
     }
 }
 
-/** Hasil eksekusi satu perintah (dari ProcessExecutor). */
+/** Hasil eksekusi satu perintah (dari builder_core.sh di terminal Termux). */
 data class CommandResult(
     val exitCode: Int,
     val stdout: String,
@@ -141,7 +141,7 @@ data class CommandResult(
     val isSuccess: Boolean get() = exitCode == 0 && !cancelled
 }
 
-/** Ringkasan error dari LogStreamParser. */
+/** Ringkasan error (dari terminal Termux / log build). */
 data class ErrorSummary(
     val lines: List<String>,
     val rawTail: String
@@ -170,7 +170,7 @@ object BuilderPaths {
 
     /**
      * Versi NDK default yang dipakai builder.
-     * HARUS konsisten dengan yang benar-benar diinstall oleh [com.termux.builder.toolchain.ToolchainManager]
+     * HARUS konsisten dengan yang benar-benar diinstall oleh builder_core.sh
      * (android-ndk-r29-aarch64.7z dari Lzhiyong/termux-ndk, diekstrak menjadi 29.0.14206865).
      * Ketidakkonsistenan di versi lama (25.2.9519653 vs 29.0.14206865) menyebabkan AGP
      * mencari NDK yang tidak ada lalu mendownload ulang / gagal.
@@ -223,7 +223,7 @@ object DependencyCatalog {
      * Diverifikasi 2026-08-08: platform-34_r01/r02/r04 TIDAK ADA (404) —
      * platform 34 hanya tersedia sebagai platform-34-ext7_r03.zip (revision 3, channel 0).
      * Untuk level lain yang tidak ada di map ini, builder mem-parse repository2-1.xml
-     * secara live (lihat ToolchainManager.resolvePlatformZipUrl).
+     * secara live (lihat logika resolve platform zip di builder_core.sh).
      */
     val PLATFORM_ZIP_FALLBACK: Map<Int, String> = mapOf(
         36 to "platform-36_r01.zip",

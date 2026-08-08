@@ -213,11 +213,6 @@
             android:exported="false" />
 
         <service
-            android:name=".app.builder.BuildForegroundService"
-            android:exported="false"
-            android:foregroundServiceType="dataSync" />
-
-        <service
             android:name=".app.RunCommandService"
             android:exported="true"
             android:permission="${TERMUX_PACKAGE_NAME}.permission.RUN_COMMAND">

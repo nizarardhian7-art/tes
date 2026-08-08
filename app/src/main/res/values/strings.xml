@@ -114,6 +114,10 @@
     <string name="builder_export_failed">Gagal membuat backup environment. Jalankan setup toolchain dulu (build sekali).</string>
     <string name="builder_cancel_toast">Membatalkan build…</string>
     <string name="builder_start_empty">Pilih project dulu</string>
+    <string name="builder_status_running">BERJALAN DI TERMINAL</string>
+    <string name="builder_message_terminal">Output tampil di terminal Termux asli. Setelah selesai, otomatis kembali ke APK Builder.</string>
+    <string name="builder_terminal_launch">Membuka terminal Termux…</string>
+    <string name="builder_cancel_hint">Build berjalan di terminal Termux. Tekan Ctrl-C di terminal untuk membatalkan.</string>
 
     <!-- TermuxMod: File Browser -->
     <string name="title_file_browser">Files</string>
