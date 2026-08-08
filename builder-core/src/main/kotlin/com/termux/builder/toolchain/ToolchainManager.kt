@@ -8,6 +8,8 @@ import com.termux.builder.model.BuilderPaths
 import com.termux.builder.model.CommandResult
 import com.termux.builder.model.DependencyCatalog
 import com.termux.builder.model.HardwareProfile
+import com.termux.builder.model.SetupPhase
+import com.termux.builder.model.SetupState
 import com.termux.shared.logger.Logger
 import java.io.File
 
@@ -37,12 +39,8 @@ class ToolchainManager(
     companion object {
         private const val LOG_TAG = "ToolchainManager"
 
-        /** Paket APT yang diinstall build.sh auto_setup(). */
-        val APT_PACKAGES = listOf(
-            "openjdk-17", "python", "gradle", "android-tools", "rsync",
-            "aapt", "aapt2", "apksigner", "d8", "aidl", "cmake", "ninja",
-            "make", "wget", "curl", "git", "zip", "unzip", "perl", "p7zip", "clang"
-        )
+        /** Paket APT yang dibutuhkan toolchain (v4: idempotent — hanya install yang kurang). */
+        val APT_PACKAGES: List<String> get() = BuilderPaths.REQUIRED_APT_PACKAGES
 
         /** Versi build-tools yang disediakan (dummy + real bila ada). */
         val DUMMY_BUILD_TOOLS = listOf("33.0.1", "34.0.0")
@@ -213,6 +211,18 @@ class ToolchainManager(
     // SETUP UTAMA
     // ============================================================
 
+    /**
+     * Setup toolchain IDEMPOTENT + RESUME (v4).
+     *
+     * Perbaikan masalah "Cancel lalu Build lagi -> apt-get install gagal exit 100":
+     *  - Sebelum `apt-get install`, cek paket yang SUDAH terpasang via `dpkg -l`
+     *    dan hanya install yang KURANG. Jika semua paket sudah ada, apt-get
+     *    TIDAK dijalankan ulang sama sekali.
+     *  - Progress setup ditulis ke marker file [BuilderPaths.SETUP_STATE_FILE]
+     *    ([SetupState]) setiap kali satu fase tuntas. Saat build di-cancel di
+     *    tengah, build berikutnya MELANJUTKAN dari fase terakhir yang terekam —
+     *    tidak mulai dari nol.
+     */
     fun setupToolchain(profile: HardwareProfile, progress: (String) -> Unit): Boolean {
         lastError = null
         val lineCb = object : ProcessExecutor.LineCallback {
@@ -236,12 +246,26 @@ class ToolchainManager(
         progress(BuildLog.info("SDK dir : $sdkDir"))
         progress(BuildLog.info("NDK versi: $ndkVersion"))
 
+        // v4: load state setup sebelumnya (resume setelah cancel)
+        var state = SetupState.load()
+        if (state.phase != SetupPhase.INIT && state.phase != SetupPhase.COMPLETE) {
+            progress(BuildLog.info("Melanjutkan setup dari fase '${state.phase}' (build sebelumnya di-cancel/terputus)."))
+        }
+
+        // ---- 0. Storage access (idempotent, sangat cepat) ----
         progress(BuildLog.step(1, 7, "Memastikan akses storage..."))
         ensureStorageAccess(lineCb)
 
-        progress(BuildLog.step(2, 7, "Menginstall paket sistem (APT)..."))
-        if (!installSystemPackages(progress, lineCb)) {
-            return false
+        // ---- 1. Paket APT (v4: hanya install yang kurang) ----
+        if (state.aptReady && allAptPackagesInstalled()) {
+            progress(BuildLog.step(2, 7, "Menginstall paket sistem (APT)..."))
+            progress(BuildLog.ok("Semua ${APT_PACKAGES.size} paket APT sudah terpasang — skip apt-get install."))
+        } else {
+            progress(BuildLog.step(2, 7, "Menginstall paket sistem (APT)..."))
+            if (!installSystemPackages(progress, lineCb)) {
+                return false
+            }
+            state = state.copy(aptReady = true, phase = SetupPhase.APT).also { it.save() }
         }
 
         val criticalBins = listOf("wget", "curl", "unzip", "zip", "rsync", "dpkg", "cmake", "ninja", "python3")
@@ -254,40 +278,70 @@ class ToolchainManager(
             )
         }
 
-        progress(BuildLog.step(3, 7, "Membangun direktori SDK..."))
-        createSdkLayout()
+        // ---- 3. Layout SDK (idempotent) ----
+        if (!state.layoutReady) {
+            progress(BuildLog.step(3, 7, "Membangun direktori SDK..."))
+            createSdkLayout()
+            state = state.copy(layoutReady = true, phase = SetupPhase.LAYOUT).also { it.save() }
+        } else {
+            progress(BuildLog.step(3, 7, "Membangun direktori SDK..."))
+            progress(BuildLog.ok("Layout SDK sudah ada — skip."))
+        }
 
-        DUMMY_BUILD_TOOLS.forEach { setupDummyBuildTools(it) }
-        DUMMY_CMAKE.forEach { setupDummyCmake(it) }
+        // Build-tools & cmake dummy (idempotent di dalam fungsinya)
+        (BuilderPaths.DUMMY_BUILD_TOOLS_VERSIONS).forEach { setupDummyBuildTools(it) }
+        (BuilderPaths.DUMMY_CMAKE_VERSIONS).forEach { setupDummyCmake(it) }
 
-        progress(BuildLog.step(4, 7, "Memastikan platform SDK (34)..."))
-        if (!ensurePlatformSdk(34, progress, lineCb)) {
-            return false
+        // ---- 4. Platform SDK 34 ----
+        if (!state.platform34Ready) {
+            progress(BuildLog.step(4, 7, "Memastikan platform SDK (34)..."))
+            if (!ensurePlatformSdk(34, progress, lineCb)) {
+                return false
+            }
+            state = state.copy(platform34Ready = true, phase = SetupPhase.PLATFORM_34).also { it.save() }
+        } else {
+            progress(BuildLog.step(4, 7, "Memastikan platform SDK (34)..."))
+            progress(BuildLog.ok("Platform android-34 sudah terpasang (dari state) — skip."))
         }
 
         writeSdkLicense()
         writeGlobalGradleProperties(profile)
 
-        progress(BuildLog.step(5, 7, "Memastikan Android NDK..."))
-        if (!isNdkInstalled()) {
+        // ---- 5. NDK ----
+        if (state.ndkReady && isNdkInstalled()) {
+            progress(BuildLog.step(5, 7, "Memastikan Android NDK..."))
+            progress(BuildLog.ok("NDK sudah terpasang: ${installedNdkVersions().joinToString(", ")} — skip download."))
+        } else if (isNdkInstalled()) {
+            progress(BuildLog.step(5, 7, "Memastikan Android NDK..."))
+            progress(BuildLog.ok("NDK terdeteksi: ${installedNdkVersions().joinToString(", ")} — skip download."))
+            state = state.copy(ndkReady = true, phase = SetupPhase.NDK).also { it.save() }
+        } else {
+            progress(BuildLog.step(5, 7, "Memastikan Android NDK..."))
             progress(BuildLog.warn("NDK belum terpasang, mendownload (sekali saja)..."))
             if (!installNdk(progress, lineCb)) {
                 return false
             }
-        } else {
-            progress(BuildLog.ok("NDK sudah terpasang: ${installedNdkVersions().joinToString(", ")} — skip download."))
+            state = state.copy(ndkReady = true, phase = SetupPhase.NDK).also { it.save() }
         }
 
+        // ---- 6. Permission NDK & wrapper template ----
         progress(BuildLog.step(6, 7, "Memperbaiki permission NDK & wrapper template..."))
         fixNdkPermissions(progress, lineCb)
-        ensureWrapperTemplate(progress, lineCb)
+        if (!state.wrapperReady) {
+            ensureWrapperTemplate(progress, lineCb)
+            state = state.copy(wrapperReady = true, phase = SetupPhase.WRAPPER).also { it.save() }
+        } else {
+            progress(BuildLog.ok("Wrapper template sudah siap (dari state) — skip."))
+        }
 
+        // ---- 7. Verifikasi akhir ----
         progress(BuildLog.step(7, 7, "Verifikasi akhir..."))
         val sdkOk = isSdkReady()
         val ndkOk = isNdkInstalled()
         if (!sdkOk) progress(BuildLog.warn("SDK belum lengkap (platform android.jar belum ada) — build mungkin gagal."))
         if (!ndkOk) progress(BuildLog.warn("NDK belum lengkap — build native akan gagal."))
 
+        state.copy(phase = SetupPhase.COMPLETE, sdkReady = sdkOk, ndkReady = ndkOk).save()
         progress(BuildLog.ok("Toolchain setup selesai (SDK=$sdkOk, NDK=$ndkOk)."))
         return true
     }
@@ -304,8 +358,25 @@ class ToolchainManager(
         }
     }
 
+    /**
+     * Install paket APT secara IDEMPOTENT (v4).
+     *
+     * Perbaikan "Cancel lalu Build lagi -> apt-get install gagal exit 100":
+     *  - Cek dulu via `dpkg -l` paket mana yang SUDAH terpasang.
+     *  - Hanya paket yang KURANG yang diinstall (`apt-get install -y <missing>`).
+     *  - Jika tidak ada yang kurang, apt-get install TIDAK dijalankan sama sekali
+     *    (mencegah error exit 100 pada repo yang rusak / dpkg lock).
+     */
     private fun installSystemPackages(progress: (String) -> Unit, lineCb: ProcessExecutor.LineCallback?): Boolean {
         val env = mapOf("DEBIAN_FRONTEND" to "noninteractive")
+
+        // v4: identifikasi paket yang belum terpasang via dpkg -l
+        val missingPackages = missingAptPackages()
+        if (missingPackages.isEmpty()) {
+            progress(BuildLog.ok("Semua paket sistem sudah terpasang — apt-get install dilewati."))
+            return true
+        }
+        progress(BuildLog.info("Paket yang belum terpasang: ${missingPackages.joinToString(", ")}"))
 
         File("$sdkDir/pkg-cache/partial").mkdirs()
 
@@ -317,11 +388,18 @@ class ToolchainManager(
             timeoutSeconds = 600
         )
         if (!update.isSuccess) {
+            // v4: jika update gagal tapi semua paket yang kita butuhkan sudah ada,
+            // lanjutkan saja (offline / repo rusak tidak memblokir).
+            val stillMissing = missingAptPackages()
+            if (stillMissing.isEmpty()) {
+                progress(BuildLog.warn("apt-get update gagal tapi semua paket sudah terpasang — lanjut."))
+                return true
+            }
             return fail("apt-get update gagal (exit ${update.exitCode}): ${tailOf(update)}. Pastikan perangkat terhubung ke internet.")
         }
 
-        val pkgList = APT_PACKAGES.joinToString(" ")
-        progress(BuildLog.info("apt-get install $pkgList"))
+        val pkgList = missingPackages.joinToString(" ")
+        progress(BuildLog.info("apt-get install -y $pkgList (hanya paket yang kurang)"))
         val install = executor.executeShellCommand(
             "apt-get install -y --fix-missing -o Dir::Cache::archives=$sdkDir/pkg-cache $pkgList",
             environment = env,
@@ -329,10 +407,38 @@ class ToolchainManager(
             timeoutSeconds = 1800
         )
         if (!install.isSuccess) {
-            return fail("apt-get install gagal (exit ${install.exitCode}): ${tailOf(install)}")
+            // v4: cek ulang — jika ternyata paket sudah terpasang (mis. sebagian
+            // berhasil sebelum error), jangan gagalkan setup total.
+            val stillMissing = missingAptPackages()
+            if (stillMissing.isEmpty()) {
+                progress(BuildLog.warn("apt-get install melaporkan error (exit ${install.exitCode}) tapi semua paket sudah terpasang — lanjut."))
+                return true
+            }
+            return fail("apt-get install gagal (exit ${install.exitCode}): ${tailOf(install)}. Paket kurang: ${stillMissing.joinToString(", ")}")
         }
         return true
     }
+
+    /**
+     * Daftar paket APT yang BELUM terpasang, dicek via `dpkg -l`.
+     * v4: ini kunci idempotensi — tanpa ini, cancel lalu build ulang akan
+     * menjalankan apt-get install lagi (gagal exit 100 di Termux).
+     */
+    fun missingAptPackages(): List<String> {
+        val result = executor.executeShellCommand(
+            "dpkg -l 2>/dev/null | awk '{print \\$2}'",
+            timeoutSeconds = 60
+        )
+        val installed = if (result.isSuccess) {
+            result.stdout.lines().map { it.trim() }.filter { it.isNotBlank() }.toSet()
+        } else {
+            emptySet()
+        }
+        return APT_PACKAGES.filter { it !in installed }
+    }
+
+    /** true bila semua paket APT yang dibutuhkan sudah terpasang. */
+    fun allAptPackagesInstalled(): Boolean = missingAptPackages().isEmpty()
 
     private fun createSdkLayout() {
         listOf(
