@@ -148,6 +148,7 @@ class ProcessExecutor(private val context: Context) {
         try {
             val deadline = if (timeoutSeconds > 0) System.currentTimeMillis() + timeoutSeconds * 1000 else Long.MAX_VALUE
             var finished = false
+            var executeEnded = false
             while (!finished) {
                 val (outDelta, outPos) = readDelta(executionCommand.resultData.stdout, stdoutPos)
                 stdoutPos = outPos
@@ -158,11 +159,28 @@ class ProcessExecutor(private val context: Context) {
                 emitDelta(errDelta, toStderr = true)
 
                 if (done.await(POLL_INTERVAL_MS, TimeUnit.MILLISECONDS)) {
+                    executeEnded = true
                     finished = true
                 } else if (cancelledFlag.get() || executionCommand.isStateFailed() || executionCommand.hasExecuted()) {
+                    executeEnded = true
                     finished = true
                 } else if (System.currentTimeMillis() >= deadline) {
                     finished = true
+                }
+            }
+
+            // v5 FIX: jika process sudah selesai tapi tidak ada trailing newline,
+            // sisa buffer partialLine (mis. "error: ..." di akhir tanpa '\n') tidak
+            // pernah di-flush oleh loop polling -> output di-swallow (build exit 1
+            // tanpa output). Flush ulang sampai partialLine kosong.
+            if (executeEnded) {
+                while (partialLine.isNotEmpty()) {
+                    val (outDelta2, outPos2) = readDelta(executionCommand.resultData.stdout, stdoutPos)
+                    stdoutPos = outPos2
+                    emitDelta(outDelta2, toStderr = false)
+                    val (errDelta2, errPos2) = readDelta(executionCommand.resultData.stderr, stderrPos)
+                    stderrPos = errPos2
+                    emitDelta(errDelta2, toStderr = true)
                 }
             }
 

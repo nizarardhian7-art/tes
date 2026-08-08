@@ -162,14 +162,6 @@ object BuilderPaths {
     /** File "last project" (persistensi menu). */
     const val LAST_PROJECT_FILE = APP_STATE_DIR + "/last_project.txt"
 
-    /**
-     * File marker status setup toolchain (v4 — resume setelah cancel).
-     * Berisi SetupState JSON: `{"phase":"...","sdk_ready":true,"ndk_ready":false,...}`.
-     * Ditulis hanya saat satu fase selesai sukses; jika build di-cancel di tengah,
-     * build berikutnya MELANJUTKAN dari fase terakhir yang terekam.
-     */
-    const val SETUP_STATE_FILE = APP_STATE_DIR + "/setup-state.json"
-
     /** Direktori backup file Gradle yang dipatch sebelum diubah (untuk rollback). */
     const val PATCH_BACKUP_DIR = APP_STATE_DIR + "/patch-backups"
 
@@ -208,115 +200,6 @@ object BuilderPaths {
 
     /** $GRADLE_HOME/wrapper/dists — distribusi Gradle yang sudah diunduh. */
     val GRADLE_WRAPPER_DISTS: String get() = DEFAULT_GRADLE_HOME + "/wrapper/dists"
-
-    /** PREFIX — root instalasi Termux (/data/data/com.termux/files/usr). */
-    val DEFAULT_PREFIX: String get() = BuilderPathsInternal.TERMUX_PREFIX_PATH
-
-    /** $PREFIX/var/cache/apt/archives — cache .deb APT (build.sh mem-backup dari sini). */
-    val APT_ARCHIVES_DIR: String get() = DEFAULT_PREFIX + "/var/cache/apt/archives"
-
-    /** Paket sistem APT yang dibutuhkan toolchain (v4: idempotent — hanya install yang kurang). */
-    val REQUIRED_APT_PACKAGES = listOf(
-        "openjdk-17", "python", "gradle", "android-tools", "rsync",
-        "aapt", "aapt2", "apksigner", "d8", "aidl", "cmake", "ninja",
-        "make", "wget", "curl", "git", "zip", "unzip", "perl", "p7zip", "clang"
-    )
-
-    /** Versi build-tools dummy yang disediakan builder (v3). */
-    val DUMMY_BUILD_TOOLS_VERSIONS = listOf("33.0.1", "34.0.0")
-
-    /** Versi CMake dummy yang disediakan builder (v3). */
-    val DUMMY_CMAKE_VERSIONS = listOf("3.22.1", "3.18.1")
-}
-
-/**
- * State setup toolchain untuk resume setelah cancel (v4).
- * Ditulis ke [BuilderPaths.SETUP_STATE_FILE] setiap kali satu fase setup
- * tuntas. Pada build berikutnya, fase yang sudah `true` dilewati.
- */
-data class SetupState(
-    /** Fase terakhir yang SELESAI (lihat [SetupPhase]). */
-    val phase: String = SetupPhase.INIT,
-    /** Paket APT sudah lengkap terpasang. */
-    val aptReady: Boolean = false,
-    /** Layout SDK (platforms/build-tools/licenses/cmake/ndk/pkg-cache) sudah dibuat. */
-    val layoutReady: Boolean = false,
-    /** Platform SDK android-34 sudah terpasang. */
-    val platform34Ready: Boolean = false,
-    /** NDK r29 sudah terpasang & valid. */
-    val ndkReady: Boolean = false,
-    /** Wrapper template + gradle.properties global sudah siap. */
-    val wrapperReady: Boolean = false,
-    /** SDK siap (platform + license) saat state disimpan. */
-    val sdkReady: Boolean = false
-) {
-    companion object {
-        /** Load state dari file default [BuilderPaths.SETUP_STATE_FILE]. */
-        fun load(): SetupState = loadFrom(File(BuilderPaths.SETUP_STATE_FILE))
-
-        /** Load state dari file tertentu (testable). */
-        fun loadFrom(file: File): SetupState {
-            return try {
-                if (!file.exists()) return SetupState()
-                val text = file.readText().trim()
-                if (text.isEmpty()) return SetupState()
-                val parts = text.removeSurrounding("{", "}").split(",").mapNotNull {
-                    val kv = it.split(":", limit = 2)
-                    if (kv.size == 2) kv[0].trim().removeSurrounding("\"") to kv[1].trim() else null
-                }.toMap()
-                fun b(key: String) = parts[key]?.toBooleanStrictOrNull() ?: false
-                SetupState(
-                    phase = parts["phase"]?.trim('"') ?: SetupPhase.INIT,
-                    aptReady = b("apt_ready"),
-                    layoutReady = b("layout_ready"),
-                    platform34Ready = b("platform34_ready"),
-                    ndkReady = b("ndk_ready"),
-                    wrapperReady = b("wrapper_ready"),
-                    sdkReady = b("sdk_ready")
-                )
-            } catch (e: Exception) {
-                SetupState()
-            }
-        }
-    }
-
-    /** Simpan state ke file default [BuilderPaths.SETUP_STATE_FILE]. */
-    fun save() = saveTo(File(BuilderPaths.SETUP_STATE_FILE))
-
-    /** Simpan state ke file tertentu (testable). */
-    fun saveTo(file: File) {
-        try {
-            file.parentFile?.mkdirs()
-            val json = buildString {
-                append("{\"phase\":\"").append(phase).append('"')
-                append(",\"apt_ready\":").append(aptReady)
-                append(",\"layout_ready\":").append(layoutReady)
-                append(",\"platform34_ready\":").append(platform34Ready)
-                append(",\"ndk_ready\":").append(ndkReady)
-                append(",\"wrapper_ready\":").append(wrapperReady)
-                append(",\"sdk_ready\":").append(sdkReady)
-                append('}')
-            }
-            val tmp = File(file.absolutePath + ".tmp")
-            tmp.writeText(json)
-            tmp.renameTo(file)
-        } catch (e: Exception) {
-            // non-fatal: state hanya optimasi resume
-        }
-    }
-
-    fun mark(phaseDone: String): SetupState = copy(phase = phaseDone).also { it.save() }
-}
-
-/** Fase-fase setup toolchain (urutan eksekusi di ToolchainManager). */
-object SetupPhase {
-    const val INIT = "init"
-    const val APT = "apt"
-    const val LAYOUT = "layout"
-    const val PLATFORM_34 = "platform_34"
-    const val NDK = "ndk"
-    const val WRAPPER = "wrapper"
-    const val COMPLETE = "complete"
 }
 
 /**
@@ -384,5 +267,4 @@ object DependencyCatalog {
 internal object BuilderPathsInternal {
     const val TERMUX_HOME_DIR_PATH = "/data/data/com.termux/files/home"
     const val TERMUX_BIN_PREFIX_DIR_PATH = "/data/data/com.termux/files/usr/bin"
-    const val TERMUX_PREFIX_PATH = "/data/data/com.termux/files/usr"
 }

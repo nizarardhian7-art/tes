@@ -206,6 +206,9 @@ class BuildOrchestrator(
                 ?: gradleFiles.firstOrNull()
             val agpVersion = rootGradle?.let { patcher.detectAgpVersion(it) }
             val gradleVersion = patcher.agpToGradle(agpVersion)
+            if (agpVersion == null) {
+                log(BuildPhase.TOOLCHAIN_SETUP, BuildLog.warn("AGP tidak terdeteksi di ${rootGradle?.name ?: "build.gradle"} \u2014 memakai Gradle $gradleVersion (default)."), 24)
+            }
             log(BuildPhase.TOOLCHAIN_SETUP, BuildLog.info("AGP=${agpVersion ?: "?"} -> Gradle $gradleVersion"), 24)
 
             if (wrapperProps.exists()) {
@@ -235,6 +238,31 @@ class BuildOrchestrator(
                 }
                 gradlew.writeText(gContent)
                 gradlew.setExecutable(true)
+            }
+
+            // v5 FIX: verifikasi wrapper SEBELUM menjalankan gradlew.
+            // Akar penyebab "Exit code 1 tanpa output": gradle-wrapper.jar hilang/rusak
+            // (< 10 KB template placeholder) -> gradlew langsung exit 1 tanpa stderr,
+            // sementara error ditampilkan hanya dari buffer stdout/stderr yang kosong.
+            if (!gradlew.exists()) {
+                return finish(BuildResult.failure(BuildPhase.FAILED,
+                    "gradlew tidak ada di project (tidak bisa disalin dari template). " +
+                        "Tambahkan file gradlew + gradle/wrapper/gradle-wrapper.jar ke project, atau cek template wrapper-template."))
+            }
+            if (!projectWrapperJar.exists() || projectWrapperJar.length() < 10_000) {
+                return finish(BuildResult.failure(BuildPhase.FAILED,
+                    "gradle-wrapper.jar tidak valid (${projectWrapperJar.length()} bytes) dan tidak bisa disalin dari template. " +
+                        "Build gagal SEBELUM Gradle dijalankan \u2014 pastikan wrapper template berisi jar asli."))
+            }
+
+            // v5: pastikan JAVA_HOME (java-17) benar-benar ada — gradlew gagal diam-diam
+            // (exit 1, tanpa output) jika java tidak ditemukan.
+            val javaHome = File("${BuilderPaths.PREFIX_BIN_DIR}/../lib/jvm/java-17-openjdk")
+            val javaBin = File(javaHome, "bin/java")
+            if (!javaBin.exists() || !javaBin.isFile) {
+                return finish(BuildResult.failure(BuildPhase.FAILED,
+                    "JAVA_HOME tidak valid: ${javaHome.absolutePath} (java tidak ditemukan). " +
+                        "Jalankan setup toolchain dulu agar openjdk-17 terpasang."))
             }
 
             // ---- 7. PATCH GRADLE FILES (dengan backup) ----
@@ -381,6 +409,22 @@ class BuildOrchestrator(
             log(BuildPhase.FAILED, BuildLog.error("Exit code ${buildResult.exitCode}. Ringkasan error:"), 0)
             summary.lines.take(15).forEach { line ->
                 log(BuildPhase.FAILED, BuildLog.error(line.take(300)), 1)
+            }
+            // v5 FIX: jika parser tidak menangkap baris error apa pun (stderr kosong
+            // karena di-swallow di ProcessExecutor / gradlew gagal diam-diam), tampilkan
+            // mentah stderr + stdout agar "exit 1 tanpa output" tidak pernah terjadi lagi.
+            if (summary.lines.isEmpty()) {
+                if (buildResult.stderr.isNotBlank()) {
+                    log(BuildPhase.FAILED, BuildLog.warn("-- stderr (mentah) --"), 1)
+                    buildResult.stderr.lines().take(25).forEach { line ->
+                        if (line.isNotBlank()) log(BuildPhase.FAILED, BuildLog.error(line.take(300)), 1)
+                    }
+                } else {
+                    log(BuildPhase.FAILED, BuildLog.warn("(stderr kosong) -- stdout mentah:"), 1)
+                    buildResult.stdout.lines().takeLast(25).forEach { line ->
+                        if (line.isNotBlank()) log(BuildPhase.FAILED, BuildLog.error(line.take(300)), 1)
+                    }
+                }
             }
             return finish(BuildResult.failure(BuildPhase.FAILED,
                 "Build gagal (exit ${buildResult.exitCode})",

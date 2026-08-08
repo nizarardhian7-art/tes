@@ -59,12 +59,26 @@ class GradleProjectPatcher {
         private val ANDROID_BLOCK_RE = Regex("(?m)^\\s*android\\s*\\{")
     }
 
-    /** Deteksi versi AGP dari root build.gradle. */
+    /** Deteksi versi AGP dari root build.gradle / build.gradle.kts (robust). */
     fun detectAgpVersion(gradleFile: File): String? {
         if (!gradleFile.exists()) return null
         val content = gradleFile.readText()
-        val m = Pattern.compile("com\\.android\\.tools\\.build:gradle:([0-9.]+)").matcher(content)
-        return if (m.find()) m.group(1) else null
+        // v5 FIX: dukung SEMUA bentuk deklarasi AGP:
+        //   - Groovy:  com.android.tools.build:gradle:8.7.3
+        //   - Groovy:  classpath 'com.android.tools.build:gradle:8.7.3'
+        //   - KTS:     id("com.android.application") version "8.7.3"
+        //   - KTS:     id 'com.android.application' version '8.7.3'
+        //   - KTS:     alias(libs.plugins.android.application)  -> tak terdeteksi (null)
+        val m = Pattern.compile(
+            "com\\.android\\.tools\\.build:gradle:([0-9][0-9.]*)|" +
+                "com\\.android\\.application[\"']?\\s*[\"']?version[\"']?\\s*[\"']?([0-9][0-9.]*)"
+        ).matcher(content)
+        if (m.find()) {
+            // Group 1 = bentuk classpath, group 2 = bentuk KTS plugin
+            val v = if (m.group(1) != null) m.group(1) else m.group(2)
+            if (v != null && v.isNotBlank()) return v
+        }
+        return null
     }
 
     /** Mapping AGP -> versi Gradle (fallback 8.7). */

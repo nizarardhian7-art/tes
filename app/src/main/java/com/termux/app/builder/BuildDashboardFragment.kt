@@ -63,25 +63,7 @@ class BuildDashboardFragment : Fragment() {
     private var currentMode: BuildMode = BuildMode.DEBUG_FAST
 
     private val logSb = SpannableStringBuilder()
-
-    /**
-     * v4: auto-scroll log TERKUNCI ke bawah (follow bottom) secara default.
-     *  - true  = setiap log baru -> scroll ke bawah (tidak pernah lompat ke atas)
-     *  - false = user sedang scroll ke atas manual -> jangan paksa scroll,
-     *            dan JANGAN lompat ke atas saat log baru masuk.
-     *  Deteksi posisi scroll via OnScrollChangeListener: jika user scroll ke atas
-     *  (bukan di bottom), kunci dilepas; begitu kembali ke bottom, kunci aktif lagi.
-     */
-    private var followBottom = true
-
-    /**
-     * v4: posisi awal baris TERAKHIR di logSb — dipakai untuk REPLACE baris
-     * progress (mis. "Download 45%") alih-alih menumpuk baris baru terus-menerus
-     * (penyebab log "naik-turun" saat progress bar Gradle/Ninja berjalan).
-     */
-    private var lastLineStart = 0
-
-    private val progressLineRegex = Regex("""\d{1,3}\s*%""")
+    private var logAppendedSinceScroll = 0
 
     private val pickBackupLauncher = registerForActivityResult(
         ActivityResultContracts.OpenDocument()
@@ -111,18 +93,6 @@ class BuildDashboardFragment : Fragment() {
         logText = view.findViewById(R.id.builder_log_text)
         logScroll = view.findViewById(R.id.builder_log_scroll)
         logClear = view.findViewById(R.id.builder_log_clear)
-
-        // v4: deteksi posisi scroll — auto-scroll terkunci ke bawah selama user
-        // tidak scroll ke atas. Begitu user kembali ke bottom, kunci aktif lagi.
-        logScroll.setOnScrollChangeListener { _, _, scrollY, _, oldScrollY ->
-            val isAtBottom = !logScroll.canScrollVertically(1)
-            when {
-                // User scroll ke atas (manual) -> lepas kunci follow-bottom
-                scrollY < oldScrollY && !isAtBottom -> followBottom = false
-                // Kembali ke bottom -> kunci aktif lagi
-                isAtBottom -> followBottom = true
-            }
-        }
         projectSpinner = view.findViewById(R.id.builder_project_spinner)
         modeToggle = view.findViewById(R.id.builder_mode_toggle)
         startButton = view.findViewById(R.id.builder_start_button)
@@ -323,32 +293,17 @@ class BuildDashboardFragment : Fragment() {
             logSb.setSpan(android.text.style.StyleSpan(style), start, logSb.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
         }
 
-        // v4: baris progress (mengandung % / berakhiran %) MENGGANTI baris
-        // terakhir, tidak menumpuk — mencegah log "naik-turun" saat progress
-        // bar Gradle/Ninja berjalan (mis. "> Task :app:build 45%").
-        if (lastLineStart > 0 && isProgressLine(parsed.text)) {
-            logSb.replace(lastLineStart, logSb.length, parsed.text + "\n")
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
-                logSb.removeSpan(android.text.style.StyleSpan::class.java)
-            }
-        } else {
-            lastLineStart = start
-        }
-
         // Batasi ukuran log (jaga memori)
         if (logSb.length > 200_000) {
             logSb.delete(0, logSb.length - 150_000)
-            lastLineStart = (lastLineStart - (logSb.length - 150_000)).coerceAtLeast(0)
         }
 
         logText.text = logSb
 
-        // v4: auto-scroll TERKUNCI ke bawah. Selama followBottom=true, setiap
-        // log baru menggulir ke bawah — TIDAK PERNAH lompat ke atas. Jika user
-        // scroll ke atas (followBottom=false), log baru TIDAK menggerakkan
-        // tampilan sama sekali (tidak ada lompatan). Scroll dilakukan via post
-        // agar terjadi SETELAH teks di-set.
-        if (followBottom) {
+        // Auto-scroll ke bawah
+        logAppendedSinceScroll++
+        if (logAppendedSinceScroll >= 5) {
+            logAppendedSinceScroll = 0
             logScroll.post { logScroll.fullScroll(View.FOCUS_DOWN) }
         }
     }
@@ -375,9 +330,6 @@ class BuildDashboardFragment : Fragment() {
             line.contains("FAILED", ignoreCase = true) ||
             line.contains("BUILD FAILED") ||
             line.contains("Exception", ignoreCase = true)
-
-    /** true bila baris adalah progress (mengandung persen) — akan REPLACE baris sebelumnya. */
-    private fun isProgressLine(line: String): Boolean = progressLineRegex.containsMatchIn(line)
 
     private fun isWarningLine(line: String): Boolean =
         line.contains("warning:", ignoreCase = true) ||
