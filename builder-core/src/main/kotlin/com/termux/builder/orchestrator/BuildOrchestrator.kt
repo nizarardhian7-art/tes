@@ -1,7 +1,7 @@
 package com.termux.builder.orchestrator
 
 import android.content.Context
-import com.termux.app.builder.BuilderScriptLauncher
+import com.termux.builder.script.BuilderScriptLauncher
 import com.termux.builder.model.BuildConfig
 import com.termux.builder.model.BuildMode
 import com.termux.builder.model.BuildPhase
